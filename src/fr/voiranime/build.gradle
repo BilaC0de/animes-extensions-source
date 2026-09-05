@@ -1,12 +1,15 @@
 ext {
     extName = 'Voiranime'
     extClass = '.Voiranime'
-    extVersionCode = 2
+    extVersionCode = 3
     isNsfw = true
 }
 
 apply plugin: "kei.plugins.extension.legacy"
 
 dependencies {
+    implementation(project(':lib:vidmolyextractor'))
+    implementation(project(':lib:voeextractor'))
+    implementation(project(':lib:streamtapeextractor'))
     implementation(project(':lib:universalextractor'))
 }
