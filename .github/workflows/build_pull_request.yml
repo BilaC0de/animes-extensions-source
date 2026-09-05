@@ -97,7 +97,7 @@ jobs:
             echo 'matrix={"chunk":[]}' >> $GITHUB_OUTPUT
             echo 'delete=[]' >> $GITHUB_OUTPUT
           else
-            python ./.github/scripts/generate-build-matrices.py origin/master ${{ secrets.SIGNING_KEY != '' && 'Release' || 'Debug' }}
+            python ./.github/scripts/generate-build-matrices.py origin/dev ${{ secrets.SIGNING_KEY != '' && 'Release' || 'Debug' }}
           fi
 
   build:
@@ -146,7 +146,7 @@ jobs:
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: "github.repository == 'yuzono/anime-extensions'"
+        if: "github.repository == 'BilaC0de/animes-extensions-source'"
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: "**/*.apk"
@@ -191,8 +191,8 @@ jobs:
       - name: Checkout repo branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: yuzono/anime-repo
-          ref: repo
+          repository: BilaC0de/extensions-anime
+          ref: repo-anime
           path: repo
           fetch-depth: 0
           persist-credentials: false

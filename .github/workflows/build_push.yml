@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - master
+      - dev
     paths:
       - '**'
       - '!**.md'
@@ -82,11 +82,11 @@ jobs:
           safe_output: false
 
         # This step is going to commit, but this will not trigger another workflow.
-        # If any changes to lib/ caused on master branch, bump the extensions that uses the modified lib.
+        # If any changes to lib/ caused on dev branch, bump the extensions that uses the modified lib.
         # If any changes caused by the merge commit, skip this step because versions should already pumped with that merge.
         # But that should be avoided because our own extensions may not be bumped.
       - name: Bump extensions that use a modified lib
-        if: steps.modified-libs.outputs.any_changed == 'true' && steps.set-env.outputs.SKIP_BUMP != 'true' && github.repository == 'yuzono/anime-extensions'
+        if: steps.modified-libs.outputs.any_changed == 'true' && steps.set-env.outputs.SKIP_BUMP != 'true' && github.repository == 'BilaC0de/animes-extensions-source'
         env:
           COMMIT_MESSAGE: ${{ steps.set-env.outputs.LATEST_COMMIT_MESSAGE }}
         run: |
@@ -163,7 +163,7 @@ jobs:
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: github.repository == 'yuzono/anime-extensions'
+        if: github.repository == 'BilaC0de/animes-extensions-source'
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: "**/*.apk"
@@ -179,7 +179,7 @@ jobs:
       !cancelled()
       && needs.prepare.result == 'success'
       && (needs.build.result == 'success' || needs.build.result == 'skipped')
-      && github.repository == 'yuzono/anime-extensions'
+      && github.repository == 'BilaC0de/animes-extensions-source'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -214,9 +214,9 @@ jobs:
       - name: Checkout repo branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: yuzono/aniyomi-repo
+          repository: BilaC0de/extensions-anime
           token: ${{ secrets.BOT_PAT }}
-          ref: repo
+          ref: repo-anime
           path: repo
           fetch-depth: 0
           persist-credentials: true
