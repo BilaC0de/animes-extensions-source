@@ -152,7 +152,7 @@ class AniZone :
             // which is usually blank/null — not a reliable live cursor. Real
             // pagination data should come from dispatchedCursor above.
             ?: NEXT_CURSOR_REGEX.find(xData)?.groupValues?.get(1)
-                ?: ""
+            ?: ""
 
         // Never claim a next page without a usable cursor to fetch it with -
         // this was the actual bug: on a filter-change call (page 1's search
@@ -582,7 +582,7 @@ class AniZone :
         )
 
         val videoUrl = vidstack?.src ?: document.selectFirst("media-player")?.attr("src")
-        ?: return emptyList()
+            ?: return emptyList()
 
         val allVideos = playlistUtils.extractFromHls(
             playlistUrl = videoUrl,
