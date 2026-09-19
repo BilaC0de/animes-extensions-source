@@ -83,9 +83,9 @@ class AniZone :
         } else {
             newLivewireCall(POPULAR_SNAPSHOT_KEY, buildJsonObject { }, buildLoadPageCalls(cursors[POPULAR_SNAPSHOT_KEY] ?: ""), slugs[POPULAR_SNAPSHOT_KEY] ?: "/anime")
         }
-        return parseAnimesPage(response, POPULAR_SNAPSHOT_KEY)
+        return parseAnimesPage(response, POPULAR_SNAPSHOT_KEY, page)
     }
-    private fun parseAnimesPage(response: Response, mapKey: String): AnimesPage {
+    private fun parseAnimesPage(response: Response, mapKey: String, page: Int): AnimesPage {
         val res = response.retryOn419 { req ->
             if (req.url.encodedPath.contains(livewireUpdateUrl)) {
                 newLivewireCall(mapKey, buildJsonObject { }, buildLoadPageCalls(cursors[mapKey] ?: ""), slugs[mapKey] ?: "/anime")
@@ -152,19 +152,32 @@ class AniZone :
             // which is usually blank/null — not a reliable live cursor. Real
             // pagination data should come from dispatchedCursor above.
             ?: NEXT_CURSOR_REGEX.find(xData)?.groupValues?.get(1)
-            ?: ""
+                ?: ""
 
-        val hasNextPage = if (cursors[mapKey].orEmpty().isNotBlank()) {
-            dispatchedHasMore ?: true
-        } else {
-            html.selectFirst("div[x-intersect~=loadMore]") != null
-        }
+        // Never claim a next page without a usable cursor to fetch it with -
+        // this was the actual bug: on a filter-change call (page 1's search
+        // request, which only updates "search"/"sort"/"type" without calling
+        // loadPage), the site doesn't dispatch a hasMore/nextCursor signal, so
+        // dispatchedHasMore/dispatchedCursor stay null and cursors[mapKey]
+        // falls back to "". The old code still trusted the page's "load more"
+        // HTML trigger in that case regardless of the blank cursor, so the app
+        // immediately fetched a "page 2" with an empty cursor - which the site
+        // answers with either the same items again or nothing, surfacing as
+        // "No results found" even though page 1 had real results.
+        val cursor = cursors[mapKey].orEmpty()
+        val hasNextPage = cursor.isNotBlank() &&
+            (dispatchedHasMore ?: (html.selectFirst("div[x-intersect~=loadMore]") != null))
 
-        // If Livewire returned only duplicates, stop pagination (false).
-        // We return rawAnimeList to satisfy the app's non-empty requirement,
-        // preventing the "No results found" error.
-        if (isLivewire && animeList.isEmpty() && rawAnimeList.isNotEmpty()) {
-            return AnimesPage(rawAnimeList, false)
+        // Safety net only, and only past page 1: page 1 always follows a
+        // resetAnimeListState() for this mapKey, so its dedupe set is empty
+        // and it can never legitimately be "all duplicates" - treating it as
+        // one here was making real page-1 results disappear as a false
+        // "No results found". From page 2 on, though, an empty deduped list
+        // alongside a non-empty raw one does mean the cursor didn't actually
+        // advance (repeated page): stop pagination and return nothing rather
+        // than re-appending the same anime a second time.
+        if (page > 1 && isLivewire && animeList.isEmpty() && rawAnimeList.isNotEmpty()) {
+            return AnimesPage(emptyList(), false)
         }
 
         return AnimesPage(animeList, hasNextPage)
@@ -215,7 +228,7 @@ class AniZone :
         } else {
             newLivewireCall(LATEST_SNAPSHOT_KEY, buildJsonObject { }, buildLoadPageCalls(cursors[LATEST_SNAPSHOT_KEY] ?: ""), slugs[LATEST_SNAPSHOT_KEY] ?: "/")
         }
-        return parseAnimesPage(response, LATEST_SNAPSHOT_KEY)
+        return parseAnimesPage(response, LATEST_SNAPSHOT_KEY, page)
     }
 
     // =============================== Search ===============================
@@ -236,7 +249,7 @@ class AniZone :
             newLivewireCall(SEARCH_SNAPSHOT_KEY, buildJsonObject { }, buildLoadPageCalls(cursors[SEARCH_SNAPSHOT_KEY] ?: ""), slugs[SEARCH_SNAPSHOT_KEY] ?: "/anime")
         }
 
-        return parseAnimesPage(response, SEARCH_SNAPSHOT_KEY)
+        return parseAnimesPage(response, SEARCH_SNAPSHOT_KEY, page)
     }
 
     // =========================== Anime Details ============================
@@ -569,7 +582,7 @@ class AniZone :
         )
 
         val videoUrl = vidstack?.src ?: document.selectFirst("media-player")?.attr("src")
-            ?: return emptyList()
+        ?: return emptyList()
 
         val allVideos = playlistUtils.extractFromHls(
             playlistUrl = videoUrl,
@@ -655,15 +668,16 @@ class AniZone :
     // ============================= Utilities ==============================
 
     /**
-     * Resets all per-list-request state (snapshot, csrf token, dedupe set,
-     * cursor) and records [slug] as the page this list's Livewire calls
-     * should be scoped to. Call at the start of every page-1 request
-     * (popular/latest/search) so a fresh listing never inherits state left
-     * over from a previous one.
+     * Resets all per-list-request state (snapshot, dedupe set, cursor) and
+     * records [slug] as the page this list's Livewire calls should be scoped
+     * to. Call at the start of every page-1 request (popular/latest/search)
+     * so a fresh listing never inherits state left over from a previous one.
+     * The CSRF [token] is site-wide, not per-list, so it's deliberately left
+     * untouched here - clearing it on every new list would force an extra
+     * network round-trip to refetch it each time.
      */
     private fun resetAnimeListState(mapKey: String, slug: String) {
         snapShots[mapKey] = ""
-        token = ""
         seenUrls.remove(mapKey)
         cursors[mapKey] = ""
         slugs[mapKey] = slug
