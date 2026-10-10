@@ -2,7 +2,7 @@ ext {
     extName = 'AnimeTake'
     extClass = '.AnimeTake'
     libVersion = 16
-    extVersionCode = 21
+    extVersionCode = 22
 }
 
 apply plugin: "kei.plugins.extension.legacy"
