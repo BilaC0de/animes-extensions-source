@@ -22,6 +22,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
@@ -110,8 +111,8 @@ class Goyabu :
         query: String,
         filters: AnimeFilterList,
     ): AnimesPage {
-        if (query.startsWith("https://")) {
-            val url = query.toHttpUrl()
+        val url = query.toHttpUrlOrNull()
+        if (url != null) {
             if (url.host != baseUrl.toHttpUrl().host) {
                 throw Exception("Unsupported url")
             }
@@ -181,11 +182,15 @@ class Goyabu :
         val script = document.selectFirst("script:containsData(const allEpisodes)")
             ?: return emptyList()
 
-        val scriptText = script.data()
-        val jsonString = scriptText
-            .substringAfter("const allEpisodes =")
+        val afterName = script.data()
+            .substringAfter("const allEpisodes", missingDelimiterValue = "")
+            .trimStart()
+        if (!afterName.startsWith("=")) return emptyList()
+
+        val jsonString = afterName.substringAfter("=")
             .substringBefore(";")
             .trim()
+        if (jsonString.isEmpty()) return emptyList()
 
         val episodes = jsonString.parseAs<List<EpisodeDto>>(json)
         return episodes.reversed().map { it.toSEpisode() }
