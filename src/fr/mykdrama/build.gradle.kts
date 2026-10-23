@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "MyKdrama"
     className = "MyKdrama"
-    versionCode = 13
+    versionCode = 14
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "animestream"

@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Egy Dead"
     className = "EgyDead"
-    versionCode = 30
+    versionCode = 31
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 }

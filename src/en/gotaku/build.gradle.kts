@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Gotaku"
     className = "Gotaku"
-    versionCode = 2
+    versionCode = 3
     contentWarning = ContentWarning.NSFW
     libVersion = "16"
 }

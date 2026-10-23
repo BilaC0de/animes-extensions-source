@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Katanime"
     className = "Katanime"
-    versionCode = 25
+    versionCode = 26
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 }

@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Tiodonghua.com"
     className = "Tiodonghua"
-    versionCode = 19
+    versionCode = 20
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "animestream"

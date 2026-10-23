@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "desu-online"
     className = "DesuOnline"
-    versionCode = 14
+    versionCode = 15
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "animestream"

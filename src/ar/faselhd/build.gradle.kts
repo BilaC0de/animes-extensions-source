@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "FASELHD"
     className = "FASELHD"
-    versionCode = 29
+    versionCode = 30
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 }

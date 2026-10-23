@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AnimeQ"
     className = "AnimeQ"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
     theme = "dooplay"

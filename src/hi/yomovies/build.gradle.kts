@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "YoMovies"
     className = "YoMovies"
-    versionCode = 35
+    versionCode = 36
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
 }

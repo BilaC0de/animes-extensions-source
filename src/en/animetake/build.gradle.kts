@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AnimeTake"
     className = "AnimeTake"
-    versionCode = 21
+    versionCode = 22
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 }

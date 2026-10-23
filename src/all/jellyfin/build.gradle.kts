@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Jellyfin"
     className = "JellyfinFactory"
-    versionCode = 32
+    versionCode = 33
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 }

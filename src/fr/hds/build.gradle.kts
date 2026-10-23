@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "HDS"
     className = "Hds"
-    versionCode = 16
+    versionCode = 17
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "dooplay"

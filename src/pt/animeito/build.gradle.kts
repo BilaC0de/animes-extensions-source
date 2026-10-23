@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AnimeIto"
     className = "AnimeIto"
-    versionCode = 10
+    versionCode = 11
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
     theme = "animestream"

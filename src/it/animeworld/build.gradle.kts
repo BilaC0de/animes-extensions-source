@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "ANIMEWORLD.tv"
     className = "ANIMEWORLD"
-    versionCode = 61
+    versionCode = 62
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 }

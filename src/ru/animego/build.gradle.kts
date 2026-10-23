@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AnimeGO.studio"
     className = "AnimeGo"
-    versionCode = 2
+    versionCode = 3
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 }

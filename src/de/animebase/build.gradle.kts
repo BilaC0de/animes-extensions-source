@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Anime-Base"
     className = "AnimeBase"
-    versionCode = 47
+    versionCode = 48
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
 }

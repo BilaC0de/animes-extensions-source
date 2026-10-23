@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AniPM"
     className = "AniPM"
-    versionCode = 6
+    versionCode = 7
     contentWarning = ContentWarning.NSFW
     libVersion = "16"
 }

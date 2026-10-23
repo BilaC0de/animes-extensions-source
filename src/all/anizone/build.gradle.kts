@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AniZone"
     className = "AniZone"
-    versionCode = 15
+    versionCode = 16
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 }

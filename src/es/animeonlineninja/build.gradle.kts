@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "AnimeOnline.Ninja"
     className = "AnimeOnlineNinja"
-    versionCode = 63
+    versionCode = 64
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "dooplay"

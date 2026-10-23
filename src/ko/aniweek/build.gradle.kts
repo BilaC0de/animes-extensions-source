@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Aniweek"
     className = "Aniweek"
-    versionCode = 19
+    versionCode = 20
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 }

@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Cineplus123"
     className = "Cineplus123"
-    versionCode = 20
+    versionCode = 21
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "dooplay"

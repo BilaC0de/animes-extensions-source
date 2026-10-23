@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Hackstore"
     className = "Hackstore"
-    versionCode = 43
+    versionCode = 44
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 }

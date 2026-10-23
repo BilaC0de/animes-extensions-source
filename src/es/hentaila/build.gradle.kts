@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "Hentaila"
     className = "Hentaila"
-    versionCode = 49
+    versionCode = 50
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
 }

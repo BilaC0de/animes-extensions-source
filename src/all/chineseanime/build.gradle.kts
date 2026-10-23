@@ -5,7 +5,7 @@ plugins {
 yuzono {
     name = "ChineseAnime"
     className = "ChineseAnime"
-    versionCode = 28
+    versionCode = 29
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
     theme = "animestream"
