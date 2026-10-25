@@ -10,6 +10,8 @@ yuzono {
     libVersion = "14"
 
     deeplink {
+        host("anime-sama.to")
+        host("anime-sama.org")
         host("anime-sama.si")
         host("anime-sama.tv")
         path("/catalogue/..*")
@@ -19,6 +21,7 @@ yuzono {
 dependencies {
     implementation(project(":lib:sibnetextractor"))
     implementation(project(":lib:vkextractor"))
+    implementation(project(":lib:voeextractor"))
     implementation(project(":lib:sendvidextractor"))
     implementation(project(":lib:vidmolyextractor"))
     implementation(project(":lib:vidhideextractor"))

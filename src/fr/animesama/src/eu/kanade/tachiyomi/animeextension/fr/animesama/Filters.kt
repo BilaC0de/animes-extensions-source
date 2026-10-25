@@ -3,7 +3,7 @@ package eu.kanade.tachiyomi.animeextension.fr.animesama
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 
-object AnimeSamaFilters {
+object Filters {
 
     open class CheckBoxFilterList(name: String, values: List<CheckBox>) : AnimeFilter.Group<AnimeFilter.CheckBox>(name, values)
 
@@ -72,6 +72,7 @@ object AnimeSamaFilters {
             Pair("VF", "VF"),
             Pair("VOSTFR", "VOSTFR"),
             Pair("VASTFR", "VASTFR"),
+            Pair("VCN", "VCN"),
         )
 
         val GENRES = arrayOf(
@@ -94,15 +95,18 @@ object AnimeSamaFilters {
             Pair("Démons", "Démons"),
             Pair("Détective", "Détective"),
             Pair("Donghua", "Donghua"),
+            Pair("Dragon", "Dragon"),
             Pair("Drame", "Drame"),
             Pair("Ecchi", "Ecchi"),
             Pair("Ecole", "Ecole"),
+            Pair("Elfe", "Elfe"),
             Pair("Enquête", "Enquête"),
             Pair("Famille", "Famille"),
             Pair("Fantastique", "Fantastique"),
             Pair("Fantasy", "Fantasy"),
             Pair("Fantômes", "Fantômes"),
             Pair("Futur", "Futur"),
+            Pair("Gastronomie", "Gastronomie"),
             Pair("Ghibli", "Ghibli"),
             Pair("Guerre", "Guerre"),
             Pair("Harcèlement", "Harcèlement"),
@@ -110,6 +114,7 @@ object AnimeSamaFilters {
             Pair("Harem inversé", "Harem inversé"),
             Pair("Histoire", "Histoire"),
             Pair("Historique", "Historique"),
+            Pair("Homosexualité", "Homosexualité"),
             Pair("Horreur", "Horreur"),
             Pair("Isekai", "Isekai"),
             Pair("Jeunesse", "Jeunesse"),
@@ -117,6 +122,8 @@ object AnimeSamaFilters {
             Pair("Jeux vidéo", "Jeux vidéo"),
             Pair("Josei", "Josei"),
             Pair("Journalisme", "Journalisme"),
+            Pair("Kaï", "Kaï"),
+            Pair("LGBT+", "LGBT+"),
             Pair("Mafia", "Mafia"),
             Pair("Magical girl", "Magical girl"),
             Pair("Magie", "Magie"),
@@ -154,6 +161,7 @@ object AnimeSamaFilters {
             Pair("Scientifique", "Scientifique"),
             Pair("Seinen", "Seinen"),
             Pair("Shôjo", "Shôjo"),
+            Pair("Shôjo-Ai", "Shôjo-Ai"),
             Pair("Shônen", "Shônen"),
             Pair("Shônen-Ai", "Shônen-Ai"),
             Pair("Slice of Life", "Slice of Life"),

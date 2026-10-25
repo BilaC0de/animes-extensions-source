@@ -5,14 +5,13 @@ import android.webkit.URLUtil
 import android.widget.Toast
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
-import aniyomi.lib.embed4meextractor.Embed4MeExtractor
 import aniyomi.lib.sendvidextractor.SendvidExtractor
-import aniyomi.lib.sibnetextractor.SibnetExtractor
 import aniyomi.lib.universalextractor.UniversalExtractor
 import aniyomi.lib.uqloadextractor.UqloadExtractor
 import aniyomi.lib.vidhideextractor.VidHideExtractor
 import aniyomi.lib.vidmolyextractor.VidMolyExtractor
 import aniyomi.lib.vkextractor.VkExtractor
+import aniyomi.lib.voeextractor.VoeExtractor
 import aniyomi.lib.youruploadextractor.YourUploadExtractor
 import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
@@ -22,6 +21,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.LazyMutable
@@ -31,16 +31,25 @@ import keiyoushi.utils.delegate
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
-import keiyoushi.utils.parallelFlatMapBlocking
 import keiyoushi.utils.parallelMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.useAsJsoup
+import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import java.util.concurrent.TimeUnit
+
+@Serializable
+private class CatalogueFragment(
+    val liste: String,
+    val pagination: String,
+)
 
 class AnimeSama :
     AnimeHttpLegacySource(),
@@ -61,12 +70,11 @@ class AnimeSama :
     override val client: OkHttpClient = super.client.newBuilder()
         .followRedirects(false)
         .addInterceptor { chain ->
-            val maxRedirects = 5
             var request = chain.request()
             var response = chain.proceed(request)
             var redirectCount = 0
 
-            while (response.isRedirect && redirectCount < maxRedirects) {
+            while (response.isRedirect && redirectCount < MAX_REDIRECTS) {
                 val newUrl = response.header("Location") ?: break
                 val newUrlHttp = request.url.resolve(newUrl) ?: break
                 val redirectedDomain = newUrlHttp.run { "$scheme://$host" }
@@ -90,9 +98,9 @@ class AnimeSama :
                 response = chain.proceed(request)
                 redirectCount++
             }
-            if (redirectCount >= maxRedirects) {
+            if (redirectCount >= MAX_REDIRECTS) {
                 response.close()
-                throw java.io.IOException("Too many redirects: $maxRedirects")
+                throw java.io.IOException("Too many redirects: $MAX_REDIRECTS")
             }
             response
         }.build()
@@ -101,71 +109,86 @@ class AnimeSama :
     override fun popularAnimeParse(response: Response): AnimesPage {
         val doc = response.useAsJsoup()
         val page = response.request.url.fragment?.toIntOrNull() ?: 0
-        val chunks = doc.select("#containerPepites > div a").chunked(5)
+        val chunks = doc.select("#containerPepites > div.as-carte:has(.as-badge-anime) a.as-carte-lien").chunked(5)
         val seasons = chunks.getOrNull(page - 1)?.parallelCatchingFlatMapBlocking {
-            val animeUrl = "$baseUrl${it.attr("href")}"
-            fetchAnimeSeasons(animeUrl, "")
-        }?.toList().orEmpty()
+            fetchAnimeSeasons("$baseUrl${it.attr("href")}", "")
+        }?.distinctBy { it.url }.orEmpty()
         return AnimesPage(seasons, page < chunks.size)
     }
 
-    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/#$page")
+    override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/#$page", headers)
 
     // =============================== Latest ===============================
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val animes = response.useAsJsoup()
-        val seasons = animes.select("#containerAjoutsAnimes > div").parallelCatchingFlatMapBlocking {
-            val animeUrl = it.getElementsByTag("a").attr("abs:href").toHttpUrl()
-            val url = animeUrl.newBuilder()
-                .removePathSegment(animeUrl.pathSize - 2)
-                .removePathSegment(animeUrl.pathSize - 3)
-                .build()
-            fetchAnimeSeasons(url.toString(), "")
-        }.distinctBy { it.url }
+        val seasons = animes.select("#containerAjoutsAnimes > div.as-carte a.as-carte-lien")
+            .mapNotNull { it.absUrl("href").toHttpUrlOrNull()?.pathSegments?.getOrNull(1) }
+            .distinct()
+            .parallelCatchingFlatMapBlocking { slug -> fetchAnimeSeasons("$baseUrl/catalogue/$slug/", "") }
+            .distinctBy { it.url }
         return AnimesPage(seasons, false)
     }
-    override fun latestUpdatesRequest(page: Int): Request = GET(baseUrl)
+
+    override fun latestUpdatesRequest(page: Int): Request = GET(baseUrl, headers)
 
     // =============================== Search ===============================
-    override fun getFilterList() = AnimeSamaFilters.FILTER_LIST
+    override fun getFilterList() = Filters.FILTER_LIST
 
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
-        if (query.startsWith("https://")) {
-            val url = query.toHttpUrl()
-            if (url.host != baseUrl.toHttpUrl().host) {
+        val queryUrl = query.toHttpUrlOrNull()
+        if (queryUrl != null) {
+            val host = queryUrl.host
+            if (host != baseUrl.toHttpUrl().host && host !in DEEPLINK_HOSTS) {
                 throw Exception("Unsupported url")
             }
-            val id = url.pathSegments.getOrNull(1)
+            val id = queryUrl.pathSegments.getOrNull(1)?.takeIf { it.isNotEmpty() }
                 ?: throw Exception("Unsupported url")
             return getSearchAnime(page, "$PREFIX_SEARCH$id", filters)
         } else if (query.startsWith(PREFIX_SEARCH)) {
             val id = query.removePrefix(PREFIX_SEARCH)
             val animeUrl = if (id.startsWith("/")) "$baseUrl$id" else "$baseUrl/$id"
-            val seasons = fetchAnimeSeasons(animeUrl, "")
-            return AnimesPage(seasons, false)
+            return AnimesPage(fetchAnimeSeasons(animeUrl, ""), false)
         }
         return super.getSearchAnime(page, query, filters)
     }
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val url = "$baseUrl/catalogue/".toHttpUrl().newBuilder()
-        val params = AnimeSamaFilters.getSearchFilters(filters)
+        // The catalogue is populated asynchronously by catalogue.js. Request its JSON fragment
+        // directly instead of parsing the initial /catalogue/ HTML page.
+        val url = "$baseUrl/catalogue/fragment.php".toHttpUrl().newBuilder()
+        val params = Filters.getSearchFilters(filters)
+
         params.types.forEach { url.addQueryParameter("type[]", it) }
         params.language.forEach { url.addQueryParameter("langue[]", it) }
         params.genres.forEach { url.addQueryParameter("genre[]", it) }
-        url.addQueryParameter("search", query)
-        url.addQueryParameter("page", "$page")
-        return GET(url.build(), headers)
+
+        if (query.isNotBlank()) {
+            url.addQueryParameter("search", query)
+        }
+        url.addQueryParameter("tri", "titre")
+        url.addQueryParameter("page", page.toString())
+
+        val requestHeaders = headers.newBuilder()
+            .set("Accept", "application/json")
+            .build()
+
+        return GET(url.build(), requestHeaders)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage {
-        val document = response.useAsJsoup()
-        val anime = document.select("#list_catalog > div a").parallelFlatMapBlocking {
-            fetchAnimeSeasons(it.attr("abs:href"), "")
-        }
-        val page = response.request.url.queryParameterValues("page").firstOrNull() ?: "1"
-        val lastPage = document.select("#list_pagination a:last-child").text()
-        val hasNextPage = lastPage.isNotEmpty() && lastPage != page
+        val fragment = response.parseAs<CatalogueFragment>()
+        val document = Jsoup.parseBodyFragment(fragment.liste, baseUrl)
+
+        val anime = document
+            .select("div.as-carte a.as-carte-lien")
+            .mapNotNull { it.absUrl("href").ifEmpty { null } }
+            .distinct()
+            .parallelCatchingFlatMapBlocking { fetchAnimeSeasons(it, "") }
+            .distinctBy { it.url }
+
+        val hasNextPage = Jsoup.parseBodyFragment(fragment.pagination, baseUrl)
+            .selectFirst("a[rel=next]") != null
+
         return AnimesPage(anime, hasNextPage)
     }
 
@@ -175,8 +198,9 @@ class AnimeSama :
         val animeUrl = "$baseUrl/${segments.take(2).joinToString("/")}/"
         val season = segments.getOrNull(2) ?: ""
 
-        val animes = fetchAnimeSeasons(animeUrl, season)
-        return animes.firstOrNull() ?: anime
+        // Listing results remain uninitialized so the app fetches current details
+        // when the anime page is opened. Only the details flow marks it initialized.
+        return fetchAnimeSeasons(animeUrl, season, initialized = true).firstOrNull() ?: anime
     }
 
     override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
@@ -184,7 +208,7 @@ class AnimeSama :
     // ============================== Episodes ==============================
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val url = anime.url.removeSuffix("/")
-        val movie = url.split("#").getOrElse(1) { "" }.toIntOrNull()
+        val movie = url.substringAfter("#", "").toIntOrNull()
         val cleanUrl = url.substringBefore("#")
         val currentFolder = cleanUrl.substringAfterLast("/")
         val isVoiceFolder = VOICES_VALUES.contains(currentFolder)
@@ -195,23 +219,68 @@ class AnimeSama :
         }
 
         val paths = (listOf(currentFolder) + VOICES_VALUES).distinct()
-        val players = paths.parallelMapBlocking { fetchPlayers("$parentUrl/$it") }
+        val results = paths.parallelMapBlocking { runCatching { fetchPlayers("$parentUrl/$it") } }
+        val players = results.map { it.getOrDefault(emptyList()) }
+        if (players.all { it.isEmpty() }) {
+            results.firstNotNullOfOrNull { it.exceptionOrNull() }?.let { throw it }
+        }
         val episodes = playersToEpisodes(players, paths)
-        return if (movie == null) episodes.reversed() else listOf(episodes[movie])
+        if (movie == null) return episodes.reversed()
+
+        // Older cached film entries can contain an index that was created from
+        // the number of players rather than the number of actual film entries.
+        return episodes.getOrNull(movie)?.let(::listOf)
+            ?: episodes.singleOrNull()?.let(::listOf)
+            ?: emptyList()
     }
 
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
     // ============================ Video Links =============================
-    private val sibnetExtractor by lazy { SibnetExtractor(client) }
-    private val vkExtractor by lazy { VkExtractor(client, headers) }
-    private val sendvidExtractor by lazy { SendvidExtractor(client, headers) }
-    private val vidmolyExtractor by lazy { VidMolyExtractor(client, headers) }
-    private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
-    private val uqloadExtractor by lazy { UqloadExtractor(client) }
-    private val yourUploadExtractor by lazy { YourUploadExtractor(client) }
-    private val embed4MeExtractor by lazy { Embed4MeExtractor(client, headers) }
+    // A blocked or dead host must fail fast: the video list waits for every host to answer.
+    private val extractorClient by lazy {
+        client.newBuilder().connectTimeout(10, TimeUnit.SECONDS).build()
+    }
+
+    private val vkExtractor by lazy { VkExtractor(extractorClient, headers) }
+    private val voeExtractor by lazy { VoeExtractor(extractorClient, headers) }
+    private val sendvidExtractor by lazy { SendvidExtractor(extractorClient, headers) }
+    private val vidmolyExtractor by lazy { VidMolyExtractor(extractorClient, headers) }
+    private val vidHideExtractor by lazy { VidHideExtractor(extractorClient, headers) }
+    private val uqloadExtractor by lazy { UqloadExtractor(extractorClient) }
+    private val yourUploadExtractor by lazy { YourUploadExtractor(extractorClient) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
+
+    private enum class PlayerHost { VK, SENDVID, VIDMOLY, VOE, VIDHIDE, UQLOAD, YOURUPLOAD, DIRECT }
+
+    private fun String.playerHost(): PlayerHost? = when {
+        contains("vk.", true) || contains("vkvideo", true) -> PlayerHost.VK
+        contains("sendvid.com", true) -> PlayerHost.SENDVID
+        contains("vidmoly", true) || contains("ansembed", true) -> PlayerHost.VIDMOLY
+        VOE_DOMAINS.any { contains(it, true) } -> PlayerHost.VOE
+        VIDHIDE_DOMAINS.any { contains(it, true) } -> PlayerHost.VIDHIDE
+        contains("uqload", true) -> PlayerHost.UQLOAD
+        contains("yourupload", true) -> PlayerHost.YOURUPLOAD
+        contains(".mp4", true) -> PlayerHost.DIRECT
+        else -> null
+    }
+
+    private suspend fun extractVideos(host: PlayerHost, playerUrl: String, prefix: String): List<Video> = when (host) {
+        PlayerHost.VK -> vkExtractor.videosFromUrl(playerUrl, prefix)
+        PlayerHost.SENDVID -> sendvidExtractor.videosFromUrl(playerUrl, prefix)
+        PlayerHost.VIDMOLY -> vidmolyExtractor.videosFromUrl(playerUrl, prefix.trim())
+        PlayerHost.VOE -> voeExtractor.videosFromUrl(playerUrl, prefix)
+        // VidHide pages ship the same stream twice (cdn master.m3u8 and a proxied /stream/ one),
+        // which shows up as duplicated entries with an identical label. Restricted to this host:
+        // other players can return distinct files under one label.
+        PlayerHost.VIDHIDE ->
+            vidHideExtractor
+                .videosFromUrl(playerUrl, videoNameGen = { quality -> "${prefix.trim()} VidHide - $quality" })
+                .distinctBy { it.videoTitle }
+        PlayerHost.UQLOAD -> uqloadExtractor.videosFromUrl(playerUrl, prefix)
+        PlayerHost.YOURUPLOAD -> yourUploadExtractor.videoFromUrl(playerUrl, headers, prefix = prefix)
+        PlayerHost.DIRECT -> listOf(Video(playerUrl, "$prefix Direct", playerUrl, headers))
+    }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val playerUrls = episode.url.parseAs<List<List<String>>>()
@@ -219,73 +288,29 @@ class AnimeSama :
 
         // Filter empty voice groups first to keep voice index aligned with scanlator
         // (playersToEpisodes stores outer=voice, scanlator skips empty voices)
-        val filteredPlayerUrls = playerUrls.filter { it.isNotEmpty() }
-        val allPairs = filteredPlayerUrls.flatMapIndexed { i, list ->
-            val prefix = "(${voiceNames.getOrElse(i) { "" }}) "
-            // Guard against empty voice name (should not happen after filter, but fallback)
-            val safePrefix = if (prefix.trim() == "()") "" else prefix
-            list.filter { it.isNotEmpty() }.map { it to safePrefix }
-        }.distinctBy { it.first }
+        val allPairs = playerUrls
+            .filter { it.isNotEmpty() }
+            .flatMapIndexed { i, list ->
+                val prefix = "(${voiceNames.getOrElse(i) { "" }}) ".takeUnless { it.trim() == "()" }.orEmpty()
+                list.filter { it.isNotEmpty() }.map { it to prefix }
+            }
+            .distinctBy { it.first }
+            .filterNot { (url, _) -> DEAD_HOSTS.any { url.contains(it, ignoreCase = true) } }
         if (allPairs.isEmpty()) return emptyList()
 
-        // Partition known hosts (parallel) vs fallback (sequential WebView)
-        val (knownPairs, unknownPairs) = allPairs.partition { (url, _) ->
-            url.contains("sibnet.ru") ||
-                url.contains("vidmoly") || url.contains("ansembed") ||
-                url.contains("vk.") || url.contains("vkvideo") ||
-                url.contains("sendvid.com") ||
-                VIDHIDE_DOMAINS.any { url.contains(it, ignoreCase = true) } ||
-                url.contains("uqload") ||
-                url.contains("yourupload") ||
-                url.contains(".mp4") ||
-                url.contains("embed4me")
-        }
+        // Known hosts run in parallel, the rest goes through the sequential WebView fallback
+        val (knownPairs, unknownPairs) = allPairs.partition { (url, _) -> url.playerHost() != null }
 
         val knownResults = knownPairs.parallelCatchingFlatMap { pair ->
             val (playerUrl, prefix) = pair
-            val vids = with(playerUrl) {
-                when {
-                    contains("sibnet.ru") -> sibnetExtractor.videosFromUrl(playerUrl, prefix)
-
-                    contains("vk.") || contains("vkvideo") -> vkExtractor.videosFromUrl(playerUrl, prefix)
-
-                    contains("sendvid.com") -> sendvidExtractor.videosFromUrl(playerUrl, prefix)
-
-                    contains("vidmoly") || contains("ansembed") -> vidmolyExtractor.videosFromUrl(playerUrl, prefix.trim())
-
-                    VIDHIDE_DOMAINS.any { contains(it, ignoreCase = true) } -> vidHideExtractor.videosFromUrl(playerUrl, videoNameGen = { quality -> "${prefix.trim()} VidHide - $quality" })
-
-                    contains("uqload") -> uqloadExtractor.videosFromUrl(playerUrl, prefix)
-
-                    contains("yourupload") -> yourUploadExtractor.videoFromUrl(playerUrl, headers, prefix = prefix)
-
-                    contains(".mp4") -> listOf(Video(playerUrl, "$prefix Direct", playerUrl, headers))
-
-                    contains("embed4me") -> try {
-                        embed4MeExtractor.videosFromUrl(playerUrl, prefix)
-                    } catch (_: Exception) {
-                        emptyList()
-                    }
-
-                    else -> emptyList()
-                }
-            }
-            // VidHide pages ship the same stream twice, as a cdn master.m3u8 and as a proxied
-            // /stream/ one, which shows up as duplicated entries with an identical label that
-            // the url-aware dedupe below cannot collapse. Restricted to those hosts: other
-            // players can return distinct files under one label, and must not lose them.
-            val dedupedVids = if (VIDHIDE_DOMAINS.any { playerUrl.contains(it, ignoreCase = true) }) {
-                vids.distinctBy { it.videoTitle }
-            } else {
-                vids
-            }
-            listOf(pair to dedupedVids)
+            val host = playerUrl.playerHost() ?: return@parallelCatchingFlatMap emptyList()
+            listOf(pair to extractVideos(host, playerUrl, prefix))
         }
         val knownVideos = knownResults.flatMap { (_, vids) -> vids }
 
         // UniversalExtractor uses WebView on main looper with CountDownLatch — must be sequential
         val fallbackPairs = unknownPairs + knownResults.mapNotNull { (pair, vids) ->
-            if (vids.isEmpty()) pair else null
+            pair.takeIf { vids.isEmpty() }
         }
         val fallbackVideos = fallbackPairs.flatMap { (playerUrl, prefix) ->
             try {
@@ -314,36 +339,38 @@ class AnimeSama :
         ).reversed()
     }
 
-    private suspend fun fetchAnimeSeasons(animeUrl: String, season: String): List<SAnime> {
-        val res = client.newCall(GET(animeUrl)).awaitSuccess()
-        return fetchAnimeSeasons(res, season)
+    private suspend fun fetchAnimeSeasons(
+        animeUrl: String,
+        season: String,
+        initialized: Boolean = false,
+    ): List<SAnime> {
+        val res = client.newCall(GET(animeUrl, headers)).awaitSuccess()
+        return fetchAnimeSeasons(res, season, initialized)
     }
 
-    private val commentRegex by lazy { Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL) }
-    private val seasonRegex by lazy { Regex("^\\s*panneauAnime\\(\"(.*)\", \"(.*)\"\\)", RegexOption.MULTILINE) }
-    private val movieNameRegex by lazy { Regex("^\\s*newSPF\\(\"(.*)\"\\);", RegexOption.MULTILINE) }
-
-    private suspend fun fetchAnimeSeasons(response: Response, season: String): List<SAnime> {
+    private suspend fun fetchAnimeSeasons(
+        response: Response,
+        season: String,
+        initialized: Boolean,
+    ): List<SAnime> {
         val animeDoc = response.useAsJsoup()
         val animeUrl = response.request.url.toString().removeSuffix("/")
         val animeName = animeDoc.selectFirst("h1")?.text() ?: ""
 
-        val statusText = animeDoc.select(".info-lbl:contains(État) + .info-val")
-            .firstOrNull()?.text() ?: ""
-
+        val statusText = animeDoc.infoValue("Statut").orEmpty()
         val animeStatus = when {
             statusText.contains("En cours", true) -> SAnime.ONGOING
-            statusText.contains("Terminé", true) -> SAnime.COMPLETED
+            statusText.contains("Termin", true) || statusText.contains("Fini", true) -> SAnime.COMPLETED
             else -> SAnime.UNKNOWN
         }
 
-        val thumbnailUrl = animeDoc.getElementById("coverOeuvre")?.attr("abs:src")
+        val thumbnailUrl = animeDoc.selectFirst(".oe-affiche img")?.attr("abs:src")?.ifEmpty { null }
             ?: animeDoc.selectFirst("meta[property=og:image]")?.attr("abs:content")
             ?: animeDoc.selectFirst("meta[itemprop=image]")?.attr("abs:content")
 
         val scripts = animeDoc.select("script").joinToString("\n") { it.data() }
-        val uncommented = commentRegex.replace(scripts, "")
-        val animes = seasonRegex.findAll(uncommented).withIndex().asIterable().parallelCatchingFlatMapBlocking { (animeIndex, seasonMatch) ->
+        val uncommented = COMMENT_REGEX.replace(scripts, "")
+        val animes = SEASON_REGEX.findAll(uncommented).withIndex().asIterable().parallelCatchingFlatMapBlocking { (animeIndex, seasonMatch) ->
             val (seasonName, seasonStem) = seasonMatch.destructured
 
             val stemSeason = seasonStem.substringBefore("/")
@@ -353,14 +380,20 @@ class AnimeSama :
 
             if (seasonStem.contains("film", true)) {
                 val moviesUrl = "$animeUrl/$seasonStem"
-                val movies = fetchPlayers(moviesUrl).ifEmpty { return@parallelCatchingFlatMapBlocking emptyList() }
-                val moviesDoc = client.newCall(GET(moviesUrl)).awaitSuccess().bodyString()
-                val matches = movieNameRegex.findAll(moviesDoc).toList()
-                List(movies.size) { i ->
+                // The page is fetched once: its players only verify that the page has playable
+                // sources (they are not the number of films), its HTML provides the film titles.
+                val page = runCatching { fetchPlayerPage(moviesUrl) }.getOrNull()
+                    ?.takeIf { it.players.isNotEmpty() }
+                    ?: return@parallelCatchingFlatMapBlocking emptyList()
+                val matches = MOVIE_NAME_REGEX.findAll(page.html).toList()
+                val movieCount = matches.size.coerceAtLeast(1)
+                List(movieCount) { i ->
+                    val movieTitle = matches.getOrNull(i)?.groupValues?.getOrNull(1)
+                        ?.takeIf { it.isNotBlank() }
                     val title = when {
-                        animeIndex == 0 && movies.size == 1 -> animeName
-                        matches.size > i -> "$animeName ${matches[i].destructured.component1()}"
-                        movies.size == 1 -> "$animeName Film"
+                        movieTitle != null -> "$animeName $movieTitle"
+                        movieCount == 1 && animeIndex == 0 -> animeName
+                        movieCount == 1 -> "$animeName Film"
                         else -> "$animeName Film ${i + 1}"
                     }
                     Pair(title, "$moviesUrl#$i")
@@ -375,18 +408,29 @@ class AnimeSama :
             }
         }
 
-        val descriptionText = animeDoc.selectFirst("#synopsisText")?.text() ?: ""
-        val genresText = animeDoc.select(".genre-pill").joinToString(", ") { g -> g.text() }
+        val altTitles = animeDoc.selectFirst("#titreAlter")?.text().orEmpty()
+        val details = listOf("Format", "Studio", "Auteur", "Diffusion", "Durée")
+            .mapNotNull { label -> animeDoc.infoValue(label)?.let { "$label : $it" } }
+        val descriptionText = buildString {
+            append(animeDoc.selectFirst("#synopsisText")?.text().orEmpty())
+            if (altTitles.isNotEmpty()) append("\n\nTitres alternatifs : $altTitles")
+            if (details.isNotEmpty()) append("\n\n${details.joinToString(" · ")}")
+        }
+        val authorText = animeDoc.infoValue("Auteur")
+        val artistText = animeDoc.infoValue("Studio")
+        val genresText = animeDoc.select(".genre-pill").joinToString { g -> g.text() }
 
-        return animes.map {
+        return animes.map { (animeTitle, animePath) ->
             SAnime.create().apply {
-                title = it.first
+                title = animeTitle
                 thumbnail_url = thumbnailUrl
                 description = descriptionText
                 genre = genresText
-                setUrlWithoutDomain(it.second.removeSuffix("/"))
+                author = authorText
+                artist = artistText
+                setUrlWithoutDomain(animePath.removeSuffix("/"))
                 status = animeStatus
-                initialized = true
+                this.initialized = initialized
             }
         }
     }
@@ -411,21 +455,56 @@ class AnimeSama :
         }
     }
 
-    private suspend fun fetchPlayers(url: String): List<List<String>> {
-        val docUrl = "${url.removeSuffix("/")}/episodes.js"
-        return try {
-            val doc = client.newCall(GET(docUrl))
-                .awaitSuccess()
-                .bodyString()
-            QuickJs.create().use { qjs ->
-                qjs.evaluate(doc)
-                val res = qjs.evaluate($$"JSON.stringify(Object.keys(this).filter(k => /^eps[0-9]+$/.test(k)).sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3))).map(k => this[k]))")
-                (res as String).parseAs<List<List<String>>>()
+    private class PlayerPage(val html: String, val players: List<List<String>>)
+
+    private suspend fun fetchPlayers(url: String): List<List<String>> = fetchPlayerPage(url).players
+
+    private suspend fun fetchPlayerPage(url: String): PlayerPage {
+        val pageUrl = "${url.removeSuffix("/")}/"
+        val pageResponse = client.newCall(GET(pageUrl, headers)).awaitSuccess()
+        val finalUrl = pageResponse.request.url.toString()
+        val html = pageResponse.bodyString()
+        val scriptUrl = Jsoup.parse(html, finalUrl)
+            .selectFirst("script[src*='episodes.js']")?.absUrl("src")
+            ?.takeIf { it.isNotEmpty() }
+            ?: throw Exception("episodes.js introuvable sur $pageUrl")
+
+        val scriptHeaders = headers.newBuilder()
+            .set("Referer", pageUrl)
+            .set("Accept", "*/*")
+            .set("Sec-Fetch-Dest", "script")
+            .set("Sec-Fetch-Mode", "no-cors")
+            .set("Sec-Fetch-Site", "same-origin")
+            .build()
+        val script = client.newCall(GET(scriptUrl, scriptHeaders)).await().use {
+            if (!it.isSuccessful) {
+                throw Exception("episodes.js : HTTP ${it.code} - ${it.body.string().toPlainText().take(150)}")
             }
-        } catch (_: Exception) {
-            emptyList()
+            it.body.string()
+        }
+        return PlayerPage(html, parsePlayers(script))
+    }
+
+    private fun parsePlayers(script: String): List<List<String>> {
+        val cleaned = LINE_COMMENT_REGEX.replace(COMMENT_REGEX.replace(script, ""), "")
+        val players = PLAYERS_REGEX.findAll(cleaned)
+            .sortedBy { it.groupValues[1].toInt() }
+            .map { match -> QUOTED_REGEX.findAll(match.groupValues[2]).map { it.groupValues[1] }.toList() }
+            .toList()
+        if (players.isNotEmpty()) return players
+
+        return QuickJs.create().use { qjs ->
+            qjs.evaluate(script)
+            val res = qjs.evaluate($$"JSON.stringify(Object.keys(this).filter(k => /^eps[0-9]+$/.test(k)).sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3))).map(k => this[k]))")
+            (res as String).parseAs<List<List<String>>>()
         }
     }
+
+    private fun Document.infoValue(label: String): String? = selectFirst("dl.oe-infos dt:containsOwn($label) + dd")
+        ?.text()
+        ?.takeIf { it.isNotEmpty() }
+
+    private fun String.toPlainText() = replace(HTML_TAG_REGEX, " ").replace(WHITESPACE_REGEX, " ").trim()
 
     private fun String.sanitizeDomain() = trim().removeSuffix("/").ifBlank { PREF_URL_DEFAULT }
 
@@ -437,6 +516,7 @@ class AnimeSama :
         }
     }
 
+    // ============================ Preferences =============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         screen.addEditTextPreference(
             key = PREF_URL_KEY,
@@ -444,7 +524,7 @@ class AnimeSama :
             default = PREF_URL_DEFAULT,
             summary = PREF_URL_SUMMARY,
             onChange = { _, newValue ->
-                val newDomain = newValue.trim().removeSuffix("/")
+                val newDomain = newValue.sanitizeDomain()
                 if (URLUtil.isValidUrl(newDomain)) {
                     updateDomain(newDomain)
                     true
@@ -455,36 +535,50 @@ class AnimeSama :
             },
         )
 
-        ListPreference(screen.context).apply {
-            key = PREF_QUALITY_KEY
-            title = "Preferred quality"
-            entries = arrayOf("1080p", "720p", "480p", "360p")
-            entryValues = arrayOf("1080", "720", "480", "360")
-            setDefaultValue(PREF_QUALITY_DEFAULT)
-            summary = "%s"
-        }.also(screen::addPreference)
+        screen.addListPreference(
+            key = PREF_QUALITY_KEY,
+            title = "Preferred quality",
+            entries = arrayOf("1080p", "720p", "480p", "360p"),
+            entryValues = arrayOf("1080", "720", "480", "360"),
+            default = PREF_QUALITY_DEFAULT,
+        )
+        screen.addListPreference(
+            key = PREF_VOICES_KEY,
+            title = "Préférence des voix",
+            entries = VOICES,
+            entryValues = VOICES_VALUES,
+            default = PREF_VOICES_DEFAULT,
+        )
+        screen.addListPreference(
+            key = PREF_PLAYER_KEY,
+            title = "Lecteur par défaut",
+            entries = PLAYERS,
+            entryValues = PLAYERS_VALUES,
+            default = PREF_PLAYER_DEFAULT,
+        )
+    }
 
-        ListPreference(screen.context).apply {
-            key = PREF_VOICES_KEY
-            title = "Préférence des voix"
-            entries = VOICES
-            entryValues = VOICES_VALUES
-            setDefaultValue(PREF_VOICES_DEFAULT)
+    private fun PreferenceScreen.addListPreference(
+        key: String,
+        title: String,
+        entries: Array<String>,
+        entryValues: Array<String>,
+        default: String,
+    ) {
+        ListPreference(context).apply {
+            this.key = key
+            this.title = title
+            this.entries = entries
+            this.entryValues = entryValues
+            setDefaultValue(default)
             summary = "%s"
-        }.also(screen::addPreference)
-
-        ListPreference(screen.context).apply {
-            key = PREF_PLAYER_KEY
-            title = "Lecteur par défaut"
-            entries = PLAYERS
-            entryValues = PLAYERS_VALUES
-            setDefaultValue(PREF_PLAYER_DEFAULT)
-            summary = "%s"
-        }.also(screen::addPreference)
+        }.also(::addPreference)
     }
 
     companion object {
         const val PREFIX_SEARCH = "id:"
+
+        private const val MAX_REDIRECTS = 5
 
         private const val PREF_URL_KEY = "base_url_pref"
         private const val PREF_URL_TITLE = "URL de base"
@@ -492,6 +586,18 @@ class AnimeSama :
         // Domain info at: https://anime-sama.pw
         private const val PREF_URL_DEFAULT = "https://anime-sama.to"
         private const val PREF_URL_SUMMARY = "Pour changer le domaine de l'extension. Voir https://anime-sama.pw"
+
+        // Must stay in sync with the deeplink hosts declared in build.gradle.kts
+        private val DEEPLINK_HOSTS = setOf("anime-sama.to", "anime-sama.org", "anime-sama.si", "anime-sama.tv")
+
+        private val COMMENT_REGEX = Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL)
+        private val LINE_COMMENT_REGEX = Regex("""^\s*//.*$""", RegexOption.MULTILINE)
+        private val PLAYERS_REGEX = Regex("""\beps(\d+)\s*=\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL)
+        private val QUOTED_REGEX = Regex("""['"]([^'"]*)['"]""")
+        private val SEASON_REGEX = Regex("^\\s*panneauAnime\\(\"(.*)\", \"(.*)\"\\)", RegexOption.MULTILINE)
+        private val MOVIE_NAME_REGEX = Regex("^\\s*newSPF\\(\"(.*)\"\\);", RegexOption.MULTILINE)
+        private val HTML_TAG_REGEX = Regex("<[^>]*>")
+        private val WHITESPACE_REGEX = Regex("\\s+")
 
         private val voicesMap = mapOf(
             "Préférer VOSTFR" to "vostfr",
@@ -510,21 +616,30 @@ class AnimeSama :
 
         private val playersMap = mapOf(
             "Sendvid" to "sendvid",
-            "Sibnet" to "sibnet",
             "VK" to "vk",
+            "VOE" to "voe",
             "VidMoly" to "vidmoly",
             "VidHide" to "vidhide",
             "Uqload" to "uqload",
             "YourUpload" to "yourupload",
-            "Myvi" to "myvi",
-            "Oneupload" to "oneupload",
             "Direct" to "direct",
-            "Embed4Me" to "embed4me",
         )
         private val PLAYERS = playersMap.keys.toTypedArray()
         private val PLAYERS_VALUES = playersMap.values.toTypedArray()
 
-        private val VIDHIDE_DOMAINS = listOf("smoothpre", "movearnpre", "minochinos", "morencius")
+        private val VIDHIDE_DOMAINS = listOf("smoothpre", "movearnpre", "minochinos", "morencius", "earnvids")
+
+        private val VOE_DOMAINS = listOf(
+            "voe.sx",
+            "teresapoliticallearn",
+            "megankiddifference",
+            "jeremyparticipantanything",
+            "jamesbornmain",
+            "claireguessthousand",
+            "derricknationtop",
+        )
+
+        private val DEAD_HOSTS = listOf("sibnet.ru", "oneupload", "embed4me", "player4me", "4meplayer", "myvi")
 
         private const val PREF_VOICES_KEY = "voices_preference"
         private const val PREF_VOICES_DEFAULT = "vostfr"
@@ -533,6 +648,6 @@ class AnimeSama :
         private const val PREF_QUALITY_DEFAULT = "1080"
 
         private const val PREF_PLAYER_KEY = "player_preference"
-        private const val PREF_PLAYER_DEFAULT = "sibnet"
+        private const val PREF_PLAYER_DEFAULT = "sendvid"
     }
 }
