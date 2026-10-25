@@ -6,7 +6,7 @@ yuzono {
     name = "AniPM"
     className = "AniPM"
     versionCode = 7
-    contentWarning = ContentWarning.NSFW
+    contentWarning = ContentWarning.MIXED
     libVersion = "16"
 }
 

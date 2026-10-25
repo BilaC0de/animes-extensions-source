@@ -6,7 +6,7 @@ yuzono {
     name = "Gotaku"
     className = "Gotaku"
     versionCode = 3
-    contentWarning = ContentWarning.NSFW
+    contentWarning = ContentWarning.MIXED
     libVersion = "16"
 }
 
