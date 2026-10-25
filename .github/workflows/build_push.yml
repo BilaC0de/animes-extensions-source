@@ -68,6 +68,10 @@ jobs:
               skip_bump=true
               ;;
           esac
+          # Un commit de merge a 2 parents (3 mots dans la sortie : le commit + ses 2 parents)
+          if [ "$(git rev-list --parents -n1 "$HEAD_SHA" | wc -w)" -gt 2 ]; then
+            skip_bump=true
+          fi
           echo "SKIP_BUMP=$skip_bump" >> $GITHUB_OUTPUT
           echo "SKIP_BUILD=$skip_build" >> $GITHUB_OUTPUT
           echo "Commit $HEAD_SHA -> SKIP_BUMP=$skip_bump SKIP_BUILD=$skip_build"
