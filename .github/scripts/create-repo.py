@@ -38,10 +38,10 @@ REPO_ICON_DIR = REPO_DIR / "icon"
 REPO_ICON_DIR.mkdir(parents=True, exist_ok=True)
 
 APK_BASE_URL = (
-    "https://raw.githubusercontent.com/yuzono/anime-repo/refs/heads/repo/apk"
+    "https://raw.githubusercontent.com/BilaC0de/extensions-anime/refs/heads/repo-anime/apk"
 )
 ICON_BASE_URL = (
-    "https://raw.githubusercontent.com/yuzono/anime-repo/refs/heads/repo/icon"
+    "https://raw.githubusercontent.com/BilaC0de/extensions-anime/refs/heads/repo-anime/icon"
 )
 
 with open("output.json", encoding="utf-8") as f:
