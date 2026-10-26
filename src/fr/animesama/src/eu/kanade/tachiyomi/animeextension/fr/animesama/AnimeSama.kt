@@ -17,24 +17,27 @@ import app.cash.quickjs.QuickJs
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.LazyMutable
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.delegate
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parallelMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.useAsJsoup
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -43,16 +46,11 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
-@Serializable
-private class CatalogueFragment(
-    val liste: String,
-    val pagination: String,
-)
-
 class AnimeSama :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val name = "Anime-Sama"
@@ -67,8 +65,23 @@ class AnimeSama :
 
     override var baseUrl by LazyMutable { preferences.customDomain.ifBlank { PREF_URL_DEFAULT }.sanitizeDomain() }
 
+    // Caps simultaneous requests to the source's own site, so a listing never bursts dozens of pages.
+    private val siteRequestLimiter = Semaphore(MAX_CONCURRENT_SITE_REQUESTS)
+
     override val client: OkHttpClient = super.client.newBuilder()
         .followRedirects(false)
+        .addInterceptor { chain ->
+            if (chain.request().url.host != baseUrl.toHttpUrlOrNull()?.host) {
+                chain.proceed(chain.request())
+            } else {
+                siteRequestLimiter.acquire()
+                try {
+                    chain.proceed(chain.request())
+                } finally {
+                    siteRequestLimiter.release()
+                }
+            }
+        }
         .addInterceptor { chain ->
             var request = chain.request()
             var response = chain.proceed(request)
@@ -200,7 +213,8 @@ class AnimeSama :
 
         // Listing results remain uninitialized so the app fetches current details
         // when the anime page is opened. Only the details flow marks it initialized.
-        return fetchAnimeSeasons(animeUrl, season, initialized = true).firstOrNull() ?: anime
+        val seasons = fetchAnimeSeasons(animeUrl, season, initialized = true)
+        return seasons.firstOrNull { it.url == anime.url } ?: seasons.firstOrNull() ?: anime
     }
 
     override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
@@ -236,8 +250,10 @@ class AnimeSama :
 
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
     // ============================ Video Links =============================
-    // A blocked or dead host must fail fast: the video list waits for every host to answer.
+    // A blocked or dead host must fail fast instead of keeping its hoster loading.
     private val extractorClient by lazy {
         client.newBuilder().connectTimeout(10, TimeUnit.SECONDS).build()
     }
@@ -251,7 +267,19 @@ class AnimeSama :
     private val yourUploadExtractor by lazy { YourUploadExtractor(extractorClient) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    private enum class PlayerHost { VK, SENDVID, VIDMOLY, VOE, VIDHIDE, UQLOAD, YOURUPLOAD, DIRECT }
+    // UniversalExtractor drives a WebView on the main looper, so its calls must not overlap.
+    private val universalMutex = Mutex()
+
+    private enum class PlayerHost(val label: String) {
+        VK("VK"),
+        SENDVID("Sendvid"),
+        VIDMOLY("VidMoly"),
+        VOE("VOE"),
+        VIDHIDE("VidHide"),
+        UQLOAD("Uqload"),
+        YOURUPLOAD("YourUpload"),
+        DIRECT("Direct"),
+    }
 
     private fun String.playerHost(): PlayerHost? = when {
         contains("vk.", true) || contains("vkvideo", true) -> PlayerHost.VK
@@ -279,52 +307,81 @@ class AnimeSama :
                 .distinctBy { it.videoTitle }
         PlayerHost.UQLOAD -> uqloadExtractor.videosFromUrl(playerUrl, prefix)
         PlayerHost.YOURUPLOAD -> yourUploadExtractor.videoFromUrl(playerUrl, headers, prefix = prefix)
-        PlayerHost.DIRECT -> listOf(Video(playerUrl, "$prefix Direct", playerUrl, headers))
+        PlayerHost.DIRECT -> listOf(Video(videoUrl = playerUrl, videoTitle = "$prefix Direct", headers = headers))
     }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    // One hoster per player link: a slow or blocked host only affects its own hoster.
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val playerUrls = episode.url.parseAs<List<List<String>>>()
-        val voiceNames = episode.scanlator?.split(", ") ?: emptyList()
+        val voiceNames = episode.scanlator?.split(", ").orEmpty()
+        val seenUrls = mutableSetOf<String>()
+        val nameCounts = mutableMapOf<String, Int>()
 
         // Filter empty voice groups first to keep voice index aligned with scanlator
         // (playersToEpisodes stores outer=voice, scanlator skips empty voices)
-        val allPairs = playerUrls
+        return playerUrls
             .filter { it.isNotEmpty() }
-            .flatMapIndexed { i, list ->
+            .flatMapIndexed { i, urls ->
                 val prefix = "(${voiceNames.getOrElse(i) { "" }}) ".takeUnless { it.trim() == "()" }.orEmpty()
-                list.filter { it.isNotEmpty() }.map { it to prefix }
+                urls.filter { it.isNotEmpty() }.map { it to prefix }
             }
-            .distinctBy { it.first }
-            .filterNot { (url, _) -> DEAD_HOSTS.any { url.contains(it, ignoreCase = true) } }
-        if (allPairs.isEmpty()) return emptyList()
+            .filter { (url, _) -> DEAD_HOSTS.none { url.contains(it, ignoreCase = true) } && seenUrls.add(url) }
+            .map { (url, prefix) ->
+                val label = url.playerHost()?.label ?: url.toHttpUrlOrNull()?.host ?: "Player"
+                val baseName = "$prefix$label"
+                val count = (nameCounts[baseName] ?: 0) + 1
+                nameCounts[baseName] = count
+                Hoster(
+                    hosterUrl = url,
+                    hosterName = if (count > 1) "$baseName $count" else baseName,
+                    internalData = prefix,
+                )
+            }
+    }
 
-        // Known hosts run in parallel, the rest goes through the sequential WebView fallback
-        val (knownPairs, unknownPairs) = allPairs.partition { (url, _) -> url.playerHost() != null }
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val playerUrl = hoster.hosterUrl
+        val prefix = hoster.internalData
 
-        val knownResults = knownPairs.parallelCatchingFlatMap { pair ->
-            val (playerUrl, prefix) = pair
-            val host = playerUrl.playerHost() ?: return@parallelCatchingFlatMap emptyList()
-            listOf(pair to extractVideos(host, playerUrl, prefix))
+        val host = playerUrl.playerHost()
+        if (host != null) {
+            val videos = try {
+                extractVideos(host, playerUrl, prefix)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return emptyList()
+            }
+            if (videos.isNotEmpty()) return videos.distinctVideos()
         }
-        val knownVideos = knownResults.flatMap { (_, vids) -> vids }
 
-        // UniversalExtractor uses WebView on main looper with CountDownLatch — must be sequential
-        val fallbackPairs = unknownPairs + knownResults.mapNotNull { (pair, vids) ->
-            pair.takeIf { vids.isEmpty() }
-        }
-        val fallbackVideos = fallbackPairs.flatMap { (playerUrl, prefix) ->
+        // Unknown host, or a known one that returned nothing: WebView fallback
+        return universalMutex.withLock {
             try {
                 universalExtractor.videosFromUrl(playerUrl, headers, prefix = prefix.trim())
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 emptyList()
             }
-        }
-
-        return (knownVideos + fallbackVideos)
-            .distinctBy { it.videoTitle to it.videoUrl.substringBefore("?") }
+        }.distinctVideos()
     }
 
+    private fun List<Video>.distinctVideos() = distinctBy { it.videoTitle to it.videoUrl.substringBefore("?") }
+
     // ============================ Utils =============================
+    override fun List<Hoster>.sortHosters(): List<Hoster> {
+        val voices = preferences.getString(PREF_VOICES_KEY, PREF_VOICES_DEFAULT)!!
+        val player = preferences.getString(PREF_PLAYER_KEY, PREF_PLAYER_DEFAULT)!!
+
+        return sortedWith(
+            compareByDescending<Hoster> { it.hosterName.contains(voices, true) }
+                .thenByDescending { it.hosterName.contains(player, true) },
+        )
+    }
+
     override fun List<Video>.sortVideos(): List<Video> {
         val voices = preferences.getString(PREF_VOICES_KEY, PREF_VOICES_DEFAULT)!!
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
@@ -344,8 +401,8 @@ class AnimeSama :
         season: String,
         initialized: Boolean = false,
     ): List<SAnime> {
-        val res = client.newCall(GET(animeUrl, headers)).awaitSuccess()
-        return fetchAnimeSeasons(res, season, initialized)
+        val response = client.newCall(GET(animeUrl, headers)).awaitSuccess()
+        return fetchAnimeSeasons(response, season, initialized)
     }
 
     private suspend fun fetchAnimeSeasons(
@@ -495,7 +552,7 @@ class AnimeSama :
 
         return QuickJs.create().use { qjs ->
             qjs.evaluate(script)
-            val res = qjs.evaluate($$"JSON.stringify(Object.keys(this).filter(k => /^eps[0-9]+$/.test(k)).sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3))).map(k => this[k]))")
+            val res = qjs.evaluate("JSON.stringify(Object.keys(this).filter(k => /^eps[0-9]+$/.test(k)).sort((a, b) => parseInt(a.slice(3)) - parseInt(b.slice(3))).map(k => this[k]))")
             (res as String).parseAs<List<List<String>>>()
         }
     }
@@ -580,6 +637,8 @@ class AnimeSama :
 
         private const val MAX_REDIRECTS = 5
 
+        private const val MAX_CONCURRENT_SITE_REQUESTS = 4
+
         private const val PREF_URL_KEY = "base_url_pref"
         private const val PREF_URL_TITLE = "URL de base"
 
@@ -651,3 +710,9 @@ class AnimeSama :
         private const val PREF_PLAYER_DEFAULT = "sendvid"
     }
 }
+
+@Serializable
+private class CatalogueFragment(
+    val liste: String,
+    val pagination: String,
+)

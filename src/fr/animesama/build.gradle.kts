@@ -5,9 +5,9 @@ plugins {
 yuzono {
     name = "Anime-Sama"
     className = "AnimeSama"
-    versionCode = 33
+    versionCode = 34
     contentWarning = ContentWarning.SAFE
-    libVersion = "14"
+    libVersion = "16"
 
     deeplink {
         host("anime-sama.to")
@@ -19,7 +19,6 @@ yuzono {
 }
 
 dependencies {
-    implementation(project(":lib:sibnetextractor"))
     implementation(project(":lib:vkextractor"))
     implementation(project(":lib:voeextractor"))
     implementation(project(":lib:sendvidextractor"))
@@ -28,5 +27,4 @@ dependencies {
     implementation(project(":lib:uqloadextractor"))
     implementation(project(":lib:youruploadextractor"))
     implementation(project(":lib:universalextractor"))
-    implementation(project(":lib:embed4meextractor"))
 }
