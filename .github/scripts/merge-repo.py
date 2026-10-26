@@ -15,6 +15,67 @@ LOCAL_REPO: Path = REMOTE_REPO.parent.joinpath(sys.argv[2])
 
 LANGUAGE_REGEX = re.compile(r"aniyomi-([^.]+)")
 
+# Dépôt de publication du fork (à garder cohérent avec APK_BASE_URL de create-repo.py)
+PUBLISH_BASE_URL = (
+    "https://raw.githubusercontent.com/BilaC0de/extensions-anime/refs/heads/repo-anime"
+)
+
+LEGACY_NSFW_TO_WARNING = {
+    0: index_pb2.CONTENT_WARNING_SAFE,
+    1: index_pb2.CONTENT_WARNING_NSFW,
+}
+
+
+def legacy_to_extension(entry: dict) -> index_pb2.Extension:
+    """Convertit une entrée de l'ancien index (format index.min.json) en message Extension."""
+    pkg = entry["pkg"]
+    version = entry["version"]
+    apk_name = entry["apk"].rsplit("/", 1)[-1]
+    return index_pb2.Extension(
+        name=entry["name"].removeprefix("Aniyomi: "),
+        packageName=pkg,
+        resources=index_pb2.Resources(
+            apkUrl=f"{PUBLISH_BASE_URL}/apk/{apk_name}",
+            iconUrl=f"{PUBLISH_BASE_URL}/icon/{pkg}.png",
+        ),
+        extensionLib=version.split(".")[0],
+        versionCode=int(entry["code"]),
+        versionName=version,
+        contentWarning=LEGACY_NSFW_TO_WARNING.get(
+            int(entry.get("nsfw", 0)), index_pb2.CONTENT_WARNING_UNSPECIFIED
+        ),
+        isTorrent=bool(entry.get("torrent", 0)),
+        sources=[
+            index_pb2.Source(
+                id=int(s["id"]),
+                name=s["name"],
+                language=s["lang"],
+                homeUrl=s["baseUrl"],
+            )
+            for s in entry.get("sources", [])
+        ],
+    )
+
+
+def load_remote_extensions(path: Path) -> list:
+    """Retourne les extensions déjà publiées, quel que soit le format du index.json distant."""
+    if not path.is_file() or not path.read_text(encoding="utf-8").strip():
+        return []
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    if isinstance(data, list):  # ancien format : tableau d'entrées
+        print("index.json distant au format legacy : conversion")
+        return [legacy_to_extension(e) for e in data]
+
+    if isinstance(data, dict):  # format protobuf-JSON
+        return list(
+            json_format.ParseDict(data, index_pb2.Index()).extensionList.extensions
+        )
+
+    raise ValueError(f"Format inattendu pour {path}: {type(data).__name__}")
+
+
 to_delete: list[str] = json.loads(sys.argv[1])
 
 for module in to_delete:
@@ -36,15 +97,14 @@ shutil.copytree(
     dirs_exist_ok=True,
 )
 
-with REMOTE_REPO.joinpath("index.json").open() as f:
-    remote_proto = json_format.Parse(f.read(), index_pb2.Index())
+remote_extensions = load_remote_extensions(REMOTE_REPO.joinpath("index.json"))
 
 with LOCAL_REPO.joinpath("index.json").open() as f:
     local_proto = json_format.Parse(f.read(), index_pb2.ExtensionList())
 
 all_extensions = [
     ext
-    for ext in remote_proto.extensionList.extensions
+    for ext in remote_extensions
     if not any(ext.packageName.endswith(f".{module}") for module in to_delete)
 ]
 all_extensions.extend(local_proto.extensions)
