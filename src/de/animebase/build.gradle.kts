@@ -4,10 +4,14 @@ plugins {
 
 yuzono {
     name = "Anime-Base"
-    className = "AnimeBase"
-    versionCode = 48
+    versionCode = 47
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
+
+    source {
+        lang = "de"
+        baseUrl = "https://anime-base.net"
+    }
 }
 
 dependencies {

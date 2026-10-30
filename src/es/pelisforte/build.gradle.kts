@@ -4,10 +4,14 @@ plugins {
 
 yuzono {
     name = "PelisForte"
-    className = "PelisForte"
-    versionCode = 54
+    versionCode = 53
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
+
+    source {
+        lang = "es"
+        baseUrl = "https://www2.pelisforte.se"
+    }
 }
 
 dependencies {

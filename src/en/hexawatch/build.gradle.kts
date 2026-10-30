@@ -4,10 +4,14 @@ plugins {
 
 yuzono {
     name = "HexaWatch"
-    className = "HexaWatch"
-    versionCode = 9
+    versionCode = 8
     contentWarning = ContentWarning.NSFW
     libVersion = "16"
+
+    source {
+        lang = "en"
+        baseUrl = "https://hexa.su"
+    }
 }
 
 dependencies {

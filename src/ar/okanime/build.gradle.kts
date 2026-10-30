@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "Okanime"
-    className = "Okanime"
-    versionCode = 29
+    versionCode = 28
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
+    source {
+        lang = "ar"
+        baseUrl = "https://www.okanime.xyz"
+    }
+
     deeplink {
-        host("www.okanime.xyz")
         path("/anime/..*")
     }
 }

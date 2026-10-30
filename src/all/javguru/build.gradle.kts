@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "Jav Guru"
-    className = "JavGuru"
-    versionCode = 48
+    versionCode = 47
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
 
+    source {
+        lang = "all"
+        baseUrl = "https://jav.guru"
+    }
+
     deeplink {
-        host("jav.guru")
         path("/.*/..*")
     }
 }

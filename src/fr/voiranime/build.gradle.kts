@@ -4,10 +4,14 @@ plugins {
 
 yuzono {
     name = "Voiranime"
-    className = "Voiranime"
-    versionCode = 4
+    versionCode = 5
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
+
+    source {
+        lang = "fr"
+        baseUrl = "https://voir-anime.to"
+    }
 
     deeplink {
         host("voir-anime.to")

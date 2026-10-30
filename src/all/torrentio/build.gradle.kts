@@ -4,14 +4,17 @@ plugins {
 
 yuzono {
     name = "Torrentio (Torrent / Debrid)"
-    className = "Torrentio"
     versionCode = 12
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
     torrent = true
 
+    source {
+        lang = "all"
+        baseUrl = "https://torrentio.strem.fun"
+    }
+
     deeplink {
-        host("torrentio.strem.fun")
         path("/anime/..*")
     }
 }

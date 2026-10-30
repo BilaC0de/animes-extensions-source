@@ -4,10 +4,14 @@ plugins {
 
 yuzono {
     name = "Oploverz"
-    className = "Oploverz"
-    versionCode = 30
+    versionCode = 29
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
+
+    source {
+        lang = "id"
+        baseUrl = "https://oploverz.site"
+    }
 }
 
 dependencies {

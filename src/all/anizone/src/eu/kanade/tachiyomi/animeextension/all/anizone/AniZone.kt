@@ -21,6 +21,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.getPreferencesLazy
@@ -42,15 +43,10 @@ import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import java.util.concurrent.ConcurrentHashMap
 
-class AniZone :
+@Source
+abstract class AniZone :
     AnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "AniZone"
-
-    override val baseUrl = "https://anizone.to"
-
-    override val lang = "all"
 
     override val supportsLatest = true
 

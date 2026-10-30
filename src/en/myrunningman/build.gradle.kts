@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "My Running Man"
-    className = "MyRunningMan"
-    versionCode = 13
+    versionCode = 12
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
+    source {
+        lang = "en"
+        baseUrl = "https://www.myrunningman.com"
+    }
+
     deeplink {
-        host("www.myrunningman.com")
         path("/ep/..*")
     }
 }

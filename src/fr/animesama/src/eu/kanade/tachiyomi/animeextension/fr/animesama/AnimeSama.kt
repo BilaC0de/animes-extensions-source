@@ -25,6 +25,7 @@ import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.annotation.Source
 import keiyoushi.utils.LazyMutable
 import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.bodyString
@@ -49,7 +50,8 @@ import org.jsoup.nodes.Document
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
-class AnimeSama :
+@Source
+abstract class AnimeSama :
     AnimeHttpSource(),
     ConfigurableAnimeSource {
 
@@ -159,7 +161,8 @@ class AnimeSama :
             return getSearchAnime(page, "$PREFIX_SEARCH$id", filters)
         } else if (query.startsWith(PREFIX_SEARCH)) {
             val id = query.removePrefix(PREFIX_SEARCH)
-            val animeUrl = if (id.startsWith("/")) "$baseUrl$id" else "$baseUrl/$id"
+            // A bare slug (from a deeplink) lives under /catalogue/; a leading "/" is a full path.
+            val animeUrl = if (id.startsWith("/")) "$baseUrl$id" else "$baseUrl/catalogue/$id/"
             return AnimesPage(fetchAnimeSeasons(animeUrl, ""), false)
         }
         return super.getSearchAnime(page, query, filters)
@@ -646,8 +649,14 @@ class AnimeSama :
         private const val PREF_URL_DEFAULT = "https://anime-sama.to"
         private const val PREF_URL_SUMMARY = "Pour changer le domaine de l'extension. Voir https://anime-sama.pw"
 
+        // Links on the default and older domains still open once baseUrl has followed a redirect to a newer one.
         // Must stay in sync with the deeplink hosts declared in build.gradle.kts
-        private val DEEPLINK_HOSTS = setOf("anime-sama.to", "anime-sama.org", "anime-sama.si", "anime-sama.tv")
+        private val DEEPLINK_HOSTS = setOf(
+            PREF_URL_DEFAULT.toHttpUrl().host,
+            "anime-sama.org",
+            "anime-sama.si",
+            "anime-sama.tv",
+        )
 
         private val COMMENT_REGEX = Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL)
         private val LINE_COMMENT_REGEX = Regex("""^\s*//.*$""", RegexOption.MULTILINE)

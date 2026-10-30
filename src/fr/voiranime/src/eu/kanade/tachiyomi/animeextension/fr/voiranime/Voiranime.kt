@@ -13,6 +13,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parallelCatchingFlatMap
@@ -28,13 +29,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 
-class Voiranime : AnimeHttpLegacySource() {
-
-    override val name = "Voiranime"
-
-    override val baseUrl = "https://voir-anime.to"
-
-    override val lang = "fr"
+@Source
+abstract class Voiranime : AnimeHttpLegacySource() {
 
     override val supportsLatest = true
 
@@ -80,7 +76,7 @@ class Voiranime : AnimeHttpLegacySource() {
         val titleLink = element.selectFirst(".item-summary .post-title a")!!
         title = titleLink.text()
         setUrlWithoutDomain(titleLink.attr("href"))
-        thumbnail_url = element.selectFirst(".item-thumb img")?.absUrl("src")?.takeIf(String::isNotBlank)
+        thumbnail_url = element.selectFirst(".item-thumb img").imageUrl()
     }
 
     // =============================== Search ==================================
@@ -163,7 +159,7 @@ class Voiranime : AnimeHttpLegacySource() {
 
         return SAnime.create().apply {
             title = document.selectFirst(".post-title h1")!!.text()
-            thumbnail_url = document.selectFirst(".summary_image img")?.absUrl("src")?.takeIf(String::isNotBlank)
+            thumbnail_url = document.selectFirst(".summary_image img").imageUrl()
             description = document.select(".description-summary .summary__content p")
                 .map { it.text().trim() }
                 .filter(String::isNotEmpty)
@@ -230,10 +226,25 @@ class Voiranime : AnimeHttpLegacySource() {
         // Préfixe "Épisode" uniquement quand le motif série est détecté (nom +
         // numéro extraits) : les films / entrées uniques passent par le repli
         // ci-dessous et gardent leur texte brut, sans numérotation artificielle.
-        name = if (parts.size >= 3) {
+        val baseName = if (parts.size >= 3) {
             "Épisode " + parts.subList(1, parts.size - 1).joinToString(" - ")
         } else {
             rawText
+        }
+
+        // Le site peut lister la VF et la VOSTFR d'un même épisode : le slug de l'URL
+        // (ex. ".../one-piece-1167-vostfr/") les distingue, on ajoute donc le suffixe
+        // sauf s'il figure déjà dans le texte affiché.
+        val slug = link.absUrl("href").trimEnd('/').substringAfterLast('/')
+        val subType = when {
+            slug.contains("vostfr", ignoreCase = true) || VOSTFR_REGEX.containsMatchIn(rawText) -> "VOSTFR"
+            VF_SLUG_REGEX.containsMatchIn(slug) || VF_TEXT_REGEX.containsMatchIn(rawText) -> "VF"
+            else -> null
+        }
+        name = if (subType != null && !baseName.contains(subType, ignoreCase = true)) {
+            "$baseName $subType"
+        } else {
+            baseName
         }
         episode_number = parts.lastOrNull()?.trim()?.toFloatOrNull() ?: -1f
 
@@ -328,6 +339,10 @@ class Voiranime : AnimeHttpLegacySource() {
 
     private val iframeSrcRegex = Regex("""<iframe[^>]*\ssrc=["']([^"']+)["']""")
 
+    private val VOSTFR_REGEX = Regex("""\bVOSTFR\b""", RegexOption.IGNORE_CASE)
+    private val VF_SLUG_REGEX = Regex("""(^|-)vf($|-)""", RegexOption.IGNORE_CASE)
+    private val VF_TEXT_REGEX = Regex("""\bVF\b""")
+
     // =============================== Utilities ==================================
 
     private fun searchListingUrl(page: Int, orderBy: String): String {
@@ -357,8 +372,13 @@ class Voiranime : AnimeHttpLegacySource() {
         val titleLink = element.selectFirst(".tab-summary .post-title a")!!
         title = titleLink.text()
         setUrlWithoutDomain(titleLink.attr("href"))
-        thumbnail_url = element.selectFirst(".tab-thumb img")?.absUrl("src")?.takeIf(String::isNotBlank)
+        thumbnail_url = element.selectFirst(".tab-thumb img").imageUrl()
     }
+
+    // Les images peuvent être chargées en lazy-loading : l'URL réelle est alors dans `data-src`.
+    private fun Element?.imageUrl(): String? = this
+        ?.let { img -> img.absUrl("data-src").ifEmpty { img.absUrl("src") } }
+        ?.takeIf(String::isNotBlank)
 
     // Cherche un bloc `.post-content_item` par son libellé (`h5`) et retourne son
     // conteneur `.summary-content`. Les libellés sont en anglais sur le site

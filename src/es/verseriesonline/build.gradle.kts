@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "VerSeriesOnline"
-    className = "VerSeriesOnline"
-    versionCode = 23
+    versionCode = 22
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
+    source {
+        lang = "es"
+        baseUrl = "https://www.verseriesonline.net"
+    }
+
     deeplink {
-        host("www.verseriesonline.net")
         path("/anime/..*")
     }
 }

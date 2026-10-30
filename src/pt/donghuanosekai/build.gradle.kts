@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "Donghua no Sekai"
-    className = "DonghuaNoSekai"
     versionCode = 4
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
+    source {
+        lang = "pt-BR"
+        baseUrl = "https://donghuanosekai.com"
+    }
+
     deeplink {
-        host("donghuanosekai.com")
         path("/..*")
     }
 }

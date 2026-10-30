@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "NimeGami"
-    className = "NimeGami"
-    versionCode = 8
+    versionCode = 7
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
+    source {
+        lang = "id"
+        baseUrl = "https://nimegami.id"
+    }
+
     deeplink {
-        host("nimegami.id")
         path("/..*")
     }
 }

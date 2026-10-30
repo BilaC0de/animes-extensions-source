@@ -4,13 +4,16 @@ plugins {
 
 yuzono {
     name = "Animes Digital"
-    className = "AnimesDigital"
-    versionCode = 11
+    versionCode = 10
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 
+    source {
+        lang = "pt-BR"
+        baseUrl = "https://animesdigital.org"
+    }
+
     deeplink {
-        host("animesdigital.org")
         path("/anime/a/..*")
     }
 }
