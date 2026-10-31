@@ -237,8 +237,8 @@ abstract class Voiranime : AnimeHttpLegacySource() {
         // sauf s'il figure déjà dans le texte affiché.
         val slug = link.absUrl("href").trimEnd('/').substringAfterLast('/')
         val subType = when {
-            slug.contains("vostfr", ignoreCase = true) || VOSTFR_REGEX.containsMatchIn(rawText) -> "VOSTFR"
-            VF_SLUG_REGEX.containsMatchIn(slug) || VF_TEXT_REGEX.containsMatchIn(rawText) -> "VF"
+            slug.contains("vostfr", ignoreCase = true) || vostfrRegex.containsMatchIn(rawText) -> "VOSTFR"
+            vfSlugRegex.containsMatchIn(slug) || vfTextRegex.containsMatchIn(rawText) -> "VF"
             else -> null
         }
         name = if (subType != null && !baseName.contains(subType, ignoreCase = true)) {
@@ -339,9 +339,9 @@ abstract class Voiranime : AnimeHttpLegacySource() {
 
     private val iframeSrcRegex = Regex("""<iframe[^>]*\ssrc=["']([^"']+)["']""")
 
-    private val VOSTFR_REGEX = Regex("""\bVOSTFR\b""", RegexOption.IGNORE_CASE)
-    private val VF_SLUG_REGEX = Regex("""(^|-)vf($|-)""", RegexOption.IGNORE_CASE)
-    private val VF_TEXT_REGEX = Regex("""\bVF\b""")
+    private val vostfrRegex = Regex("""\bVOSTFR\b""", RegexOption.IGNORE_CASE)
+    private val vfSlugRegex = Regex("""(^|-)vf($|-)""", RegexOption.IGNORE_CASE)
+    private val vfTextRegex = Regex("""\bVF\b""")
 
     // =============================== Utilities ==================================
 
