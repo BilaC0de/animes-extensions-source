@@ -150,7 +150,9 @@ jobs:
         if: "github.repository == 'BilaC0de/animes-extensions-source'"
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
-          path: "**/*.apk"
+          path: |
+            **/*.apk
+            **/build/keiyoushi-source-info.json
           retention-days: 1
 
       - name: Clean up CI files
