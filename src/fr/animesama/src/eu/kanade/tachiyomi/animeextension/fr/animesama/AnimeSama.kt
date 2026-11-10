@@ -31,6 +31,7 @@ import keiyoushi.utils.addEditTextPreference
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.delegate
 import keiyoushi.utils.getPreferencesLazy
+import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parallelMapBlocking
 import keiyoushi.utils.parseAs
@@ -117,28 +118,32 @@ abstract class AnimeSama :
         }.build()
 
     // ============================== Popular ===============================
-    override fun popularAnimeParse(response: Response): AnimesPage {
-        val doc = response.useAsJsoup()
-        val page = response.request.url.fragment?.toIntOrNull() ?: 0
+    // Suspend flow: the per-anime page fetches are awaited instead of blocking a thread inside a parse method.
+    override suspend fun getPopularAnime(page: Int): AnimesPage {
+        val doc = client.newCall(popularAnimeRequest(page)).awaitSuccess().useAsJsoup()
         val chunks = doc.select("#containerPepites > div.as-carte:has(.as-badge-anime) a.as-carte-lien").chunked(5)
-        val seasons = chunks.getOrNull(page - 1)?.parallelCatchingFlatMapBlocking {
+        val seasons = chunks.getOrNull(page - 1)?.parallelCatchingFlatMap {
             fetchAnimeSeasons("$baseUrl${it.attr("href")}", "")
         }?.distinctBy { it.url }.orEmpty()
         return AnimesPage(seasons, page < chunks.size)
     }
 
+    override fun popularAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
+
     override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/#$page", headers)
 
     // =============================== Latest ===============================
-    override fun latestUpdatesParse(response: Response): AnimesPage {
-        val animes = response.useAsJsoup()
-        val seasons = animes.select("#containerAjoutsAnimes > div.as-carte a.as-carte-lien")
+    override suspend fun getLatestUpdates(page: Int): AnimesPage {
+        val doc = client.newCall(latestUpdatesRequest(page)).awaitSuccess().useAsJsoup()
+        val seasons = doc.select("#containerAjoutsAnimes > div.as-carte a.as-carte-lien")
             .mapNotNull { it.absUrl("href").toHttpUrlOrNull()?.pathSegments?.getOrNull(1) }
             .distinct()
-            .parallelCatchingFlatMapBlocking { slug -> fetchAnimeSeasons("$baseUrl/catalogue/$slug/", "") }
+            .parallelCatchingFlatMap { slug -> fetchAnimeSeasons("$baseUrl/catalogue/$slug/", "") }
             .distinctBy { it.url }
         return AnimesPage(seasons, false)
     }
+
+    override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     override fun latestUpdatesRequest(page: Int): Request = GET(baseUrl, headers)
 
@@ -148,11 +153,14 @@ abstract class AnimeSama :
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
         val queryUrl = query.toHttpUrlOrNull()
         if (queryUrl != null) {
+            // Deeplink: the app sends the full opened URL as the query.
             val host = queryUrl.host
-            if (host != baseUrl.toHttpUrl().host && host !in DEEPLINK_HOSTS) {
+            if (host != baseUrl.toHttpUrlOrNull()?.host && host !in DEEPLINK_HOSTS) {
                 throw Exception("Unsupported url")
             }
-            val id = queryUrl.pathSegments.getOrNull(1)?.takeIf { it.isNotEmpty() }
+            val segments = queryUrl.pathSegments
+            val id = segments.getOrNull(1)
+                ?.takeIf { segments.firstOrNull() == "catalogue" && it.isNotEmpty() }
                 ?: throw Exception("Unsupported url")
             return getSearchAnime(page, "$PREFIX_SEARCH$id", filters)
         } else if (query.startsWith(PREFIX_SEARCH)) {
@@ -161,7 +169,18 @@ abstract class AnimeSama :
             val animeUrl = if (id.startsWith("/")) "$baseUrl$id" else "$baseUrl/catalogue/$id/"
             return AnimesPage(fetchAnimeSeasons(animeUrl, ""), false)
         }
-        return super.getSearchAnime(page, query, filters)
+
+        val response = client.newCall(searchAnimeRequest(page, query, filters)).awaitSuccess()
+        val fragment = response.parseAs<CatalogueFragment>()
+        val anime = Jsoup.parseBodyFragment(fragment.liste, baseUrl)
+            .select("div.as-carte a.as-carte-lien")
+            .mapNotNull { it.absUrl("href").ifEmpty { null } }
+            .distinct()
+            .parallelCatchingFlatMap { fetchAnimeSeasons(it, "") }
+            .distinctBy { it.url }
+        val hasNextPage = Jsoup.parseBodyFragment(fragment.pagination, baseUrl)
+            .selectFirst("a[rel=next]") != null
+        return AnimesPage(anime, hasNextPage)
     }
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
@@ -187,22 +206,7 @@ abstract class AnimeSama :
         return GET(url.build(), requestHeaders)
     }
 
-    override fun searchAnimeParse(response: Response): AnimesPage {
-        val fragment = response.parseAs<CatalogueFragment>()
-        val document = Jsoup.parseBodyFragment(fragment.liste, baseUrl)
-
-        val anime = document
-            .select("div.as-carte a.as-carte-lien")
-            .mapNotNull { it.absUrl("href").ifEmpty { null } }
-            .distinct()
-            .parallelCatchingFlatMapBlocking { fetchAnimeSeasons(it, "") }
-            .distinctBy { it.url }
-
-        val hasNextPage = Jsoup.parseBodyFragment(fragment.pagination, baseUrl)
-            .selectFirst("a[rel=next]") != null
-
-        return AnimesPage(anime, hasNextPage)
-    }
+    override fun searchAnimeParse(response: Response): AnimesPage = throw UnsupportedOperationException()
 
     // =========================== Anime Details ============================
     override suspend fun getAnimeDetails(anime: SAnime): SAnime {
@@ -413,10 +417,10 @@ abstract class AnimeSama :
         val animeUrl = response.request.url.toString().removeSuffix("/")
         val animeName = animeDoc.selectFirst("h1")?.text() ?: ""
 
-        val statusText = animeDoc.infoValue("Statut").orEmpty()
+        val statusText = animeDoc.infoValue("Statut").orEmpty().lowercase()
         val animeStatus = when {
-            statusText.contains("En cours", true) -> SAnime.ONGOING
-            statusText.contains("Termin", true) || statusText.contains("Fini", true) -> SAnime.COMPLETED
+            "en cours" in statusText -> SAnime.ONGOING
+            "termin" in statusText || "fini" in statusText -> SAnime.COMPLETED
             else -> SAnime.UNKNOWN
         }
 
