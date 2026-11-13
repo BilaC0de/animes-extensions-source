@@ -6,16 +6,19 @@ plugins {
 
 yuzono {
     name = "Voiranime"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.NSFW
     libVersion = "14"
 
     source {
         lang = "fr"
-        baseUrl = "https://voir-anime.to"
+        baseUrl {
+            custom("https://voiranime.cx")
+        }
     }
 
     deeplink {
+        host("voiranime.cx")
         host("voir-anime.to")
         path("/anime/..*")
     }

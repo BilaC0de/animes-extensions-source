@@ -89,7 +89,7 @@ object Filters {
     )
 
     // Slugs du formulaire de recherche avancée. Les libellés de tous les genres sauf
-    // "Cartoon" et "R+" sont confirmés via le menu de navigation du site (voir-anime.to) ;
+    // "Cartoon" et "R+" sont confirmés via le menu de navigation du site (voiranime.cx) ;
     // "Cartoon" et "R+" (uniquement présents dans le formulaire avancé) sont déduits du slug.
     private val GENRES = arrayOf(
         Pair("Action", "action"),
