@@ -1,87 +1,97 @@
 package eu.kanade.tachiyomi.animeextension.fr.voiranime
 
+import aniyomi.lib.filemoonextractor.FilemoonExtractor
 import aniyomi.lib.streamtapeextractor.StreamTapeExtractor
 import aniyomi.lib.universalextractor.UniversalExtractor
+import aniyomi.lib.vidhideextractor.VidHideExtractor
 import aniyomi.lib.vidmolyextractor.VidMolyExtractor
 import aniyomi.lib.voeextractor.VoeExtractor
+import aniyomi.lib.youruploadextractor.YourUploadExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.awaitSuccess
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.firstInstanceOrNull
-import keiyoushi.utils.parallelCatchingFlatMap
+import keiyoushi.utils.get
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.post
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 
 @Source
-abstract class Voiranime : AnimeHttpLegacySource() {
+abstract class Voiranime : AnimeHttpSource() {
 
     override val supportsLatest = true
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder().add("Referer", "$baseUrl/")
 
     // Sans Referer : certains CDN (ex. celui derrière VidMoly) répondent 500 si le
     // Referer du site hôte est envoyé en plus de celui que l'extracteur définit lui-même.
     private val extractorHeaders by lazy { headers.newBuilder().removeAll("Referer").build() }
 
+    private val filemoonExtractor by lazy { FilemoonExtractor(client) }
+    private val streamTapeExtractor by lazy { StreamTapeExtractor(client) }
+    private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
     private val vidMolyExtractor by lazy { VidMolyExtractor(client, extractorHeaders) }
     private val voeExtractor by lazy { VoeExtractor(client, extractorHeaders) }
-    private val streamTapeExtractor by lazy { StreamTapeExtractor(client) }
+    private val yourUploadExtractor by lazy { YourUploadExtractor(client) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    // ============================== Popular ================================
-    // Page "Recherche AV" triée par popularité (m_orderby=trending).
+    // UniversalExtractor pilote une WebView : ses appels ne doivent pas se chevaucher
+    // (l'app peut résoudre plusieurs hosters en parallèle).
+    private val universalMutex = Mutex()
 
+    // ============================== Popular ===============================
+    // Page "Recherche AV" triée par popularité (m_orderby=trending).
     override fun popularAnimeRequest(page: Int): Request = GET(searchListingUrl(page, "trending"), headers)
 
     override fun popularAnimeParse(response: Response): AnimesPage = parseSearchListing(response)
 
-    // =============================== Latest =================================
-    // Page d'accueil ("EN COURS") : liste les animes ayant reçu un épisode récemment,
-    // triée par date de dernière mise à jour. Pagination confirmée en `/page/{n}/`
-    // (identique à la page de recherche, testée directement sur le site).
-
+    // =============================== Latest ===============================
+    // Page d'accueil ("EN COURS") : animes ayant reçu un épisode récemment.
+    // Pagination en `/page/{n}/`.
     override fun latestUpdatesRequest(page: Int): Request {
         val url = if (page > 1) "$baseUrl/page/$page/" else "$baseUrl/"
         return GET(url, headers)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage {
-        val document = response.asJsoup()
-
-        val animes = document.select("div.page-item-detail").map(::latestAnimeFromElement)
-        val hasNextPage = document.selectFirst(nextPageSelector) != null
-
+        val document = response.useAsJsoup()
+        val animes = document.select("div.page-item-detail").mapNotNull(::latestAnimeFromElement)
+        val hasNextPage = document.selectFirst(NEXT_PAGE_SELECTOR) != null
         return AnimesPage(animes, hasNextPage)
     }
 
-    private fun latestAnimeFromElement(element: Element): SAnime = SAnime.create().apply {
-        val titleLink = element.selectFirst(".item-summary .post-title a")!!
-        title = titleLink.text()
-        setUrlWithoutDomain(titleLink.attr("href"))
-        thumbnail_url = element.selectFirst(".item-thumb img").imageUrl()
+    private fun latestAnimeFromElement(element: Element): SAnime? {
+        val titleLink = element.selectFirst(".item-summary .post-title a") ?: return null
+        return SAnime.create().apply {
+            title = titleLink.text()
+            setUrlWithoutDomain(titleLink.attr("abs:href"))
+            thumbnail_url = element.selectFirst(".item-thumb img").imageUrl()
+        }
     }
 
-    // =============================== Search ==================================
+    // =============================== Search ===============================
     // Page "Recherche AV" (formulaire simple + formulaire avancé, voir Filters.kt).
-
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val filterList = filters.ifEmpty { Filters.FILTER_LIST }
         val pagePath = if (page > 1) "page/$page/" else ""
@@ -135,6 +145,7 @@ abstract class Voiranime : AnimeHttpLegacySource() {
     override fun searchAnimeParse(response: Response): AnimesPage = parseSearchListing(response)
 
     override suspend fun getSearchAnime(page: Int, query: String, filters: AnimeFilterList): AnimesPage {
+        // Deeplink : l'app envoie l'URL complète ouverte comme requête.
         if (query.startsWith("http")) {
             val url = query.toHttpUrlOrNull()
             if (url != null && url.host.contains(baseUrl.toHttpUrl().host)) {
@@ -149,96 +160,89 @@ abstract class Voiranime : AnimeHttpLegacySource() {
 
     override fun getFilterList(): AnimeFilterList = Filters.FILTER_LIST
 
-    // =============================== Details ==================================
-    // Champs regroupés dans des blocs répétés `.post-content_item` (label en `h5`,
-    // valeur en `.summary-content`). Studios/Author/Artist ne sont pas toujours
-    // présents (confirmé en comparant plusieurs animes), donc accès sûrs uniquement.
+    // =========================== Anime Details ============================
+    // Champs regroupés dans des blocs `.post-content_item` (label en `.summary-heading`,
+    // valeur en `.summary-content`). Studios/Author/Artist ne sont pas toujours présents :
+    // accès sûrs uniquement.
+    override suspend fun getAnimeDetails(anime: SAnime): SAnime {
+        val document = client.get("$baseUrl${anime.url}", headers).useAsJsoup()
+        return detailsFromDocument(document, anime.url)
+    }
 
-    override fun animeDetailsParse(response: Response): SAnime {
-        val document = response.asJsoup()
+    override fun animeDetailsParse(response: Response): SAnime = throw UnsupportedOperationException()
 
-        return SAnime.create().apply {
-            title = document.selectFirst(".post-title h1")!!.text()
-            thumbnail_url = document.selectFirst(".summary_image img").imageUrl()
-            description = document.select(".description-summary .summary__content p")
-                .map { it.text().trim() }
-                .filter(String::isNotEmpty)
-                .joinToString("\n\n")
-                .takeIf(String::isNotEmpty)
-            genre = document.metaItem("Genre(s)")?.select("a")?.joinToString { it.text() }
-            author = document.metaText("Author")
-            artist = document.metaText("Artist")
-            status = parseStatus(document.metaText("Status"))
-            initialized = true
-        }
+    private fun detailsFromDocument(document: Document, animeUrl: String): SAnime = SAnime.create().apply {
+        url = animeUrl
+        // ownText() : évite d'inclure les badges (HOT, NEW…) que Madara met dans le <h1>.
+        title = document.selectFirst(".post-title h1")?.ownText()?.trim()?.takeIf(String::isNotEmpty)
+            ?: document.selectFirst("h1")?.text().orEmpty()
+        thumbnail_url = document.selectFirst(".summary_image img").imageUrl()
+        description = document.select(".description-summary .summary__content p")
+            .map { it.text().trim() }
+            .filter(String::isNotEmpty)
+            .joinToString("\n\n")
+            .takeIf(String::isNotEmpty)
+            ?: document.selectFirst(".description-summary .summary__content, .manga-excerpt")?.text()
+        genre = document.select(".genres-content a").joinToString { it.text() }.ifBlank { null }
+            ?: document.metaItem("Genre(s)")?.select("a")?.joinToString { it.text() }
+        author = document.metaText("Author") ?: document.metaText("Studios")
+        artist = document.metaText("Artist")
+        status = parseStatus(document.metaText("Status"))
+        initialized = true
     }
 
     private fun parseStatus(status: String?): Int {
         val value = status?.lowercase() ?: return SAnime.UNKNOWN
         return when {
             value.contains("cours") -> SAnime.ONGOING
-            value.contains("termin") -> SAnime.COMPLETED
+            value.contains("termin") || value.contains("compl") -> SAnime.COMPLETED
             value.contains("annul") -> SAnime.CANCELLED
             value.contains("pause") -> SAnime.ON_HIATUS
             else -> SAnime.UNKNOWN
         }
     }
 
-    // =============================== Episodes ==================================
-    // La page anime n'embarque pas forcément la liste complète des épisodes pour
-    // les séries à très grand nombre d'épisodes (comportement Madara classique :
-    // la liste HTML statique n'est qu'un aperçu, le JS du site charge le reste via
-    // cet endpoint ajax). On utilise donc systématiquement l'endpoint ajax, qui
-    // renvoie le même motif de fragment `li.wp-manga-chapter` que la page statique.
-    //
-    // Motif du site : "{préfixe} - {nom épisode} - {numéro}". On découpe nous-mêmes
-    // (première/dernière partie) plutôt que de garder le texte brut, pour un
-    // affichage cohérent qu'importe la comparaison interne de l'app avec le titre
-    // affiché de l'anime. Les entrées qui ne suivent pas ce motif (films, épisodes
-    // uniques) gardent leur texte brut tel quel plutôt qu'un numéro artificiel.
-    // La liste est déjà triée du plus récent au plus ancien sur le site, conforme
-    // à l'exigence de tri décroissant.
-
-    override fun episodeListRequest(anime: SAnime): Request {
+    // ============================== Episodes ==============================
+    // La liste HTML statique n'est qu'un aperçu pour les séries très longues : on utilise
+    // systématiquement l'endpoint ajax Madara (header X-Requested-With obligatoire), qui renvoie
+    // des `li.wp-manga-chapter`. La liste est déjà triée du plus récent au plus ancien.
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val ajaxHeaders = headersBuilder()
             .add("X-Requested-With", "XMLHttpRequest")
             .build()
-        // On normalise le trailing slash de anime.url plutôt que de le supposer présent :
-        // une simple concaténation aurait cassé l'URL (ou produit un chemin invalide)
-        // si un lien de titre venait un jour sans "/" final.
-        val animePath = anime.url.removeSuffix("/")
-        return POST("$baseUrl$animePath/ajax/chapters/", ajaxHeaders)
+        val chaptersUrl = anime.url.resolvePageUrl()
+            ?.newBuilder()
+            ?.addPathSegments("ajax/chapters/")
+            ?.build()
+            ?: return emptyList()
+        val document = client.post(chaptersUrl.toString(), ajaxHeaders).useAsJsoup()
+        return document.select("li.wp-manga-chapter").map(::episodeFromElement)
     }
 
-    override fun episodeListParse(response: Response): List<SEpisode> {
-        val document = response.asJsoup()
+    override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
-        return document.select(episodeListSelector).map(::episodeFromElement)
-    }
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
+    // Motif du site : "{préfixe} - {nom épisode} - {numéro}". Les entrées qui ne suivent pas ce
+    // motif (films, épisodes uniques) gardent leur texte brut.
     private fun episodeFromElement(element: Element): SEpisode = SEpisode.create().apply {
         val link = element.selectFirst("a")!!
-        setUrlWithoutDomain(link.absUrl("href"))
+        val href = link.absUrl("href")
+        setUrlWithoutDomain(href)
 
         val rawText = link.text().trim()
         val parts = rawText.split(" - ")
-
-        // Préfixe "Épisode" uniquement quand le motif série est détecté (nom +
-        // numéro extraits) : les films / entrées uniques passent par le repli
-        // ci-dessous et gardent leur texte brut, sans numérotation artificielle.
         val baseName = if (parts.size >= 3) {
             "Épisode " + parts.subList(1, parts.size - 1).joinToString(" - ")
         } else {
             rawText
         }
 
-        // Le site peut lister la VF et la VOSTFR d'un même épisode : le slug de l'URL
-        // (ex. ".../one-piece-1167-vostfr/") les distingue, on ajoute donc le suffixe
-        // sauf s'il figure déjà dans le texte affiché.
-        val slug = link.absUrl("href").trimEnd('/').substringAfterLast('/')
+        // Le site peut lister la VF et la VOSTFR d'un même épisode : le slug les distingue.
+        val slug = href.trimEnd('/').substringAfterLast('/')
         val subType = when {
-            slug.contains("vostfr", ignoreCase = true) || vostfrRegex.containsMatchIn(rawText) -> "VOSTFR"
-            vfSlugRegex.containsMatchIn(slug) || vfTextRegex.containsMatchIn(rawText) -> "VF"
+            slug.contains("vostfr", ignoreCase = true) || VOSTFR_REGEX.containsMatchIn(rawText) -> "VOSTFR"
+            VF_SLUG_REGEX.containsMatchIn(slug) || VF_TEXT_REGEX.containsMatchIn(rawText) -> "VF"
             else -> null
         }
         name = if (subType != null && !baseName.contains(subType, ignoreCase = true)) {
@@ -246,21 +250,26 @@ abstract class Voiranime : AnimeHttpLegacySource() {
         } else {
             baseName
         }
-        episode_number = parts.lastOrNull()?.trim()?.toFloatOrNull() ?: -1f
+
+        // Le slug porte le numéro de façon fiable (ex. ".../one-piece-0001-vostfr/"), contrairement
+        // au texte affiché qui peut contenir des chiffres du titre. Le site complète avec des zéros.
+        episode_number = EP_NUM_REGEX.find(slug)?.groupValues?.get(1)
+            ?.trimStart('0')?.ifEmpty { "0" }
+            ?.replace(',', '.')
+            ?.toFloatOrNull()
+            ?: parts.lastOrNull()?.trim()?.toFloatOrNull()
+                ?: -1f
 
         date_upload = element.selectFirst(".chapter-release-date")?.text()?.let(::parseEpisodeDate) ?: 0L
     }
 
-    // Pas d'ancrage sur `.listing-chapters_wrap` : ce conteneur fait partie du
-    // gabarit de la page anime complète, absent du fragment retourné par l'ajax.
-    private val episodeListSelector = "li.wp-manga-chapter"
-
-    private val episodeDateFormat by lazy { SimpleDateFormat("MMMM d, yyyy", Locale.ENGLISH) }
+    private val episodeDateFormatEn by lazy { SimpleDateFormat("MMMM d, yyyy", Locale.ENGLISH) }
+    private val episodeDateFormatFr by lazy { SimpleDateFormat("d MMMM yyyy", Locale.FRENCH) }
 
     private fun parseEpisodeDate(dateStr: String): Long = if (dateStr.contains("ago", ignoreCase = true)) {
         parseRelativeDate(dateStr)
     } else {
-        episodeDateFormat.tryParse(dateStr)
+        episodeDateFormatEn.tryParse(dateStr).takeIf { it != 0L } ?: episodeDateFormatFr.tryParse(dateStr)
     }
 
     private fun parseRelativeDate(date: String): Long {
@@ -276,74 +285,109 @@ abstract class Voiranime : AnimeHttpLegacySource() {
             "second" -> Calendar.SECOND
             else -> return 0L
         }
-
         return Calendar.getInstance().apply { add(field, -amount) }.timeInMillis
     }
 
-    // =============================== Videos ==================================
-    // Tous les lecteurs (et leur balise <iframe> déjà résolue) sont embarqués dans
-    // une variable JS `thisChapterSources` (JSON valide : Map<nom du lecteur, HTML
-    // de l'iframe>) directement dans la page épisode. Pas d'appel ajax nécessaire ici.
-    //
-    // Dispatch par lecteur plutôt qu'un unique appel générique WebView, pour la
-    // fiabilité et la vitesse (voir historique des extracteurs dédiés ci-dessous) :
-    // - myTV : marque blanche VidMoly (domaine observé rotatif, ex. voembed.net) ;
-    //   routé sur le LABEL "myTV", pas sur le domaine, pour rester valide si celui-ci
-    //   change.
-    // - VOE / Stape : domaines officiels stables (voe.sx, streamtape.com), routage
-    //   par domaine classique.
-    // - MOON (gn1r5n.org) : nécessite un clic manuel avant tout chargement (challenge
-    //   anti-bot + lecteur JW Player), incompatible avec le sniffing passif de
-    //   `UniversalExtractor`. Exclu explicitement pour éviter une attente inutile.
-    // - FHD1 (my.mail.ru) : très rarement présent/fonctionnel sur ce site (souvent
-    //   une source 404 côté site). Exclu pour la même raison que MOON.
-    // - Tout autre lecteur inconnu retombe sur `UniversalExtractor` en dernier
-    //   recours (WebView + sniffing réseau), au prix d'un délai potentiel plus élevé.
+    // ============================== Hosters ===============================
+    // Deux sources possibles pour la liste des lecteurs selon la version de la page épisode :
+    // 1. le sélecteur `select.host-select` (chaque option pointe vers une page de redirection
+    //    qui contient l'iframe, résolue seulement au moment de lancer le hoster) ;
+    // 2. à défaut, la variable JS `thisChapterSources` (Map<nom du lecteur, HTML de l'iframe>),
+    //    qui embarque directement l'URL de l'iframe.
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val pageUrl = episode.url.resolvePageUrl()?.toString() ?: return emptyList()
+        val document = client.get(pageUrl, headers).useAsJsoup()
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val episodeUrl = baseUrl + episode.url
-        val document = client.newCall(GET(episodeUrl, headers)).awaitSuccess().useAsJsoup()
+        val fromSelect = document.select("select.host-select option").mapNotNull { option ->
+            val redirect = option.attr("data-redirect").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val name = option.attr("value").cleanHosterName()
+                .ifBlank { option.text().cleanHosterName() }
+            Hoster(hosterName = name, internalData = "$REDIRECT_PREFIX$redirect")
+        }
+        if (fromSelect.isNotEmpty()) return fromSelect.distinctBy { it.internalData }
 
         val sources = document.selectFirst("script:containsData(thisChapterSources)")
             ?.data()
             ?.substringAfter("thisChapterSources = ")
             ?.substringBefore(";")
             ?.let { runCatching { it.parseAs<Map<String, String>>() }.getOrNull() }
+            .orEmpty()
 
-        if (sources.isNullOrEmpty()) return emptyList()
+        return sources.mapNotNull { (serverName, iframeHtml) ->
+            val iframe = IFRAME_SRC_REGEX.find(iframeHtml)?.groupValues?.get(1) ?: return@mapNotNull null
+            Hoster(hosterName = serverName.cleanHosterName(), internalData = "$IFRAME_PREFIX$iframe")
+        }.distinctBy { it.internalData }
+    }
 
-        return sources.entries.parallelCatchingFlatMap { (serverName, iframeHtml) ->
-            val iframe = iframeSrcRegex.find(iframeHtml)?.groupValues?.get(1)
-                ?: return@parallelCatchingFlatMap emptyList()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-            val label = serverName.removePrefix("LECTEUR").trim()
-            val host = iframe.toHttpUrlOrNull()?.host.orEmpty()
+    // ========================= Video Extraction ===========================
+    // Dispatch par lecteur plutôt qu'un appel générique WebView, pour la fiabilité et la vitesse :
+    // - myTV : marque blanche VidMoly (domaine rotatif) ; routé sur le LABEL, pas sur le domaine.
+    // - VOE / Stape / SB / YU : extracteurs dédiés.
+    // - MOON (Filemoon) : peut exiger un clic manuel (challenge anti-bot) ; en cas d'échec,
+    //   seul ce hoster est vide.
+    // - FHD1 (my.mail.ru) : très rarement fonctionnel, exclu.
+    // - Tout autre lecteur retombe sur UniversalExtractor (WebView + sniffing réseau).
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val data = hoster.internalData
+        val label = hoster.hosterName
 
-            when {
-                label.equals("myTV", ignoreCase = true) || host.contains("vidmoly", ignoreCase = true) ->
-                    vidMolyExtractor.videosFromUrl(iframe, prefix = "$label - ")
+        val iframe: String
+        val referer: String
+        if (data.startsWith(IFRAME_PREFIX)) {
+            iframe = data.removePrefix(IFRAME_PREFIX)
+            referer = "$baseUrl/"
+        } else {
+            val pageUrl = data.removePrefix(REDIRECT_PREFIX).resolvePageUrl()?.toString() ?: return emptyList()
+            iframe = client.get(pageUrl, headers).useAsJsoup()
+                .selectFirst("iframe")?.attr("abs:src")?.takeIf { it.isNotEmpty() }
+                ?: return emptyList()
+            referer = pageUrl
+        }
+        val host = iframe.toHttpUrlOrNull()?.host.orEmpty()
 
-                host.contains("voe.sx", ignoreCase = true) ->
-                    voeExtractor.videosFromUrl(iframe, prefix = "$label - ")
+        return when {
+            label.contains("myTV", true) || host.contains("vidmoly", true) ->
+                vidMolyExtractor.videosFromUrl(iframe, prefix = "$label - ")
 
-                host.contains("streamtape", ignoreCase = true) ->
-                    streamTapeExtractor.videosFromUrl(iframe, "$label - Streamtape")
+            label.contains("VOE", true) || host.contains("voe.sx", true) ->
+                voeExtractor.videosFromUrl(iframe, prefix = "$label - ")
 
-                label.equals("MOON", ignoreCase = true) || host.contains("mail.ru", ignoreCase = true) ->
+            label.contains("Stape", true) || label.contains("StreamTape", true) || host.contains("streamtape", true) ->
+                streamTapeExtractor.videosFromUrl(iframe, "$label - Streamtape")
+
+            label.contains("MOON", true) ->
+                try {
+                    filemoonExtractor.videosFromUrl(iframe, prefix = "$label - Filemoon - ", referer = referer)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
                     emptyList()
+                }
 
-                else -> universalExtractor.videosFromUrl(iframe, extractorHeaders, prefix = "$label - ")
+            host.contains("mail.ru", true) -> emptyList()
+
+            label.contains("SB", true) ->
+                vidHideExtractor.videosFromUrl(iframe, videoNameGen = { quality -> "$label - VidHide - $quality" })
+
+            label.contains("YU", true) || host.contains("yourupload", true) ->
+                yourUploadExtractor.videoFromUrl(iframe, extractorHeaders, prefix = "$label - ")
+
+            else -> universalMutex.withLock {
+                universalExtractor.videosFromUrl(iframe, extractorHeaders, prefix = "$label - ")
             }
         }
     }
 
-    private val iframeSrcRegex = Regex("""<iframe[^>]*\ssrc=["']([^"']+)["']""")
+    // =============================== Utils ================================
+    private fun String.cleanHosterName() = removePrefix("LECTEUR").trim()
 
-    private val vostfrRegex = Regex("""\bVOSTFR\b""", RegexOption.IGNORE_CASE)
-    private val vfSlugRegex = Regex("""(^|-)vf($|-)""", RegexOption.IGNORE_CASE)
-    private val vfTextRegex = Regex("""\bVF\b""")
-
-    // =============================== Utilities ==================================
+    // N'accepte que les liens du domaine du site (relatifs ou absolus).
+    private fun String.resolvePageUrl(): HttpUrl? {
+        val base = baseUrl.toHttpUrl()
+        return base.resolve(this)?.takeIf { it.host == base.host }
+    }
 
     private fun searchListingUrl(page: Int, orderBy: String): String {
         val pagePath = if (page > 1) "page/$page/" else ""
@@ -356,23 +400,25 @@ abstract class Voiranime : AnimeHttpLegacySource() {
     }
 
     private fun parseSearchListing(response: Response): AnimesPage {
-        val document = response.asJsoup()
-
-        val animes = document.select(searchListingSelector).map(::searchAnimeFromElement)
-        val hasNextPage = document.selectFirst(nextPageSelector) != null
-
+        val document = response.useAsJsoup()
+        val animes = document.select("div.c-tabs-item__content").mapNotNull(::searchAnimeFromElement)
+        val hasNextPage = document.selectFirst(NEXT_PAGE_SELECTOR) != null
         return AnimesPage(animes, hasNextPage)
     }
 
-    private val searchListingSelector = "div.row.c-tabs-item__content"
-
-    private val nextPageSelector = ".wp-pagenavi .nextpostslink"
-
-    private fun searchAnimeFromElement(element: Element): SAnime = SAnime.create().apply {
-        val titleLink = element.selectFirst(".tab-summary .post-title a")!!
-        title = titleLink.text()
-        setUrlWithoutDomain(titleLink.attr("href"))
-        thumbnail_url = element.selectFirst(".tab-thumb img").imageUrl()
+    private fun searchAnimeFromElement(element: Element): SAnime? {
+        val link = element.selectFirst(".tab-summary .post-title a")
+            ?: element.selectFirst("a[href*=/anime/]")
+            ?: element.selectFirst("a")
+            ?: return null
+        val img = element.selectFirst(".tab-thumb img") ?: element.selectFirst("img")
+        return SAnime.create().apply {
+            setUrlWithoutDomain(link.attr("abs:href"))
+            title = link.text().ifBlank { link.attr("title") }
+                .ifBlank { img?.attr("alt").orEmpty() }
+                .trim()
+            thumbnail_url = img.imageUrl()
+        }
     }
 
     // Les images peuvent être chargées en lazy-loading : l'URL réelle est alors dans `data-src`.
@@ -380,12 +426,25 @@ abstract class Voiranime : AnimeHttpLegacySource() {
         ?.let { img -> img.absUrl("data-src").ifEmpty { img.absUrl("src") } }
         ?.takeIf(String::isNotBlank)
 
-    // Cherche un bloc `.post-content_item` par son libellé (`h5`) et retourne son
-    // conteneur `.summary-content`. Les libellés sont en anglais sur le site
-    // ("Status", "Genre(s)"...) même si les valeurs sont en français.
+    // Cherche un bloc `.post-content_item` par son libellé (`.summary-heading`) et retourne son
+    // `.summary-content`. Les libellés sont en anglais sur le site ("Status", "Genre(s)"…).
     private fun Element.metaItem(label: String): Element? = select(".post-content_item").firstOrNull {
         it.selectFirst(".summary-heading")?.text()?.trim().equals(label, ignoreCase = true)
     }?.selectFirst(".summary-content")
 
     private fun Element.metaText(label: String): String? = metaItem(label)?.text()?.trim()?.takeIf(String::isNotEmpty)
+
+    companion object {
+        private const val NEXT_PAGE_SELECTOR = "a.nextpostslink"
+
+        private const val REDIRECT_PREFIX = "redirect|"
+        private const val IFRAME_PREFIX = "iframe|"
+
+        private val IFRAME_SRC_REGEX = Regex("""<iframe[^>]*\ssrc=["']([^"']+)["']""")
+
+        private val EP_NUM_REGEX = Regex("""-(\d+(?:[.,]\d+)?)-(?:vostfr|vf)""", RegexOption.IGNORE_CASE)
+        private val VOSTFR_REGEX = Regex("""\bVOSTFR\b""", RegexOption.IGNORE_CASE)
+        private val VF_SLUG_REGEX = Regex("""(^|-)vf($|-)""", RegexOption.IGNORE_CASE)
+        private val VF_TEXT_REGEX = Regex("""\bVF\b""")
+    }
 }
