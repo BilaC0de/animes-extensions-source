@@ -258,7 +258,7 @@ abstract class Voiranime : AnimeHttpSource() {
             ?.replace(',', '.')
             ?.toFloatOrNull()
             ?: parts.lastOrNull()?.trim()?.toFloatOrNull()
-                ?: -1f
+            ?: -1f
 
         date_upload = element.selectFirst(".chapter-release-date")?.text()?.let(::parseEpisodeDate) ?: 0L
     }
@@ -435,7 +435,10 @@ abstract class Voiranime : AnimeHttpSource() {
     private fun Element.metaText(label: String): String? = metaItem(label)?.text()?.trim()?.takeIf(String::isNotEmpty)
 
     companion object {
-        private const val NEXT_PAGE_SELECTOR = "a.nextpostslink"
+        // Sans filtre, la pagination est celle de wp-pagenavi (`a.nextpostslink`). Avec des filtres
+        // (genre, etc.), le site affiche la navigation Madara par défaut : le lien « Older Posts »
+        // (`.nav-previous`) pointe vers la page SUIVANTE, et `.nav-next` vers la précédente.
+        private const val NEXT_PAGE_SELECTOR = "a.nextpostslink, .paging-navigation .nav-previous a"
 
         private const val REDIRECT_PREFIX = "redirect|"
         private const val IFRAME_PREFIX = "iframe|"
