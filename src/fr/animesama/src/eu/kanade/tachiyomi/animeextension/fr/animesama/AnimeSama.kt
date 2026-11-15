@@ -38,9 +38,17 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
 import keiyoushi.utils.useAsJsoup
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -48,6 +56,7 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
@@ -135,12 +144,17 @@ abstract class AnimeSama :
     // =============================== Latest ===============================
     override suspend fun getLatestUpdates(page: Int): AnimesPage {
         val doc = client.newCall(latestUpdatesRequest(page)).awaitSuccess().useAsJsoup()
-        val seasons = doc.select("#containerAjoutsAnimes > div.as-carte a.as-carte-lien")
+        // Par paquets de 5 (comme Populaires) : on ne télécharge que les fiches de la page affichée,
+        // le reste est chargé quand l'utilisateur descend dans la liste.
+        val chunks = doc.select("#containerAjoutsAnimes > div.as-carte a.as-carte-lien")
             .mapNotNull { it.absUrl("href").toHttpUrlOrNull()?.pathSegments?.getOrNull(1) }
             .distinct()
-            .parallelCatchingFlatMap { slug -> fetchAnimeSeasons("$baseUrl/catalogue/$slug/", "") }
-            .distinctBy { it.url }
-        return AnimesPage(seasons, false)
+            .chunked(5)
+        val seasons = chunks.getOrNull(page - 1)
+            ?.parallelCatchingFlatMap { slug -> fetchAnimeSeasons("$baseUrl/catalogue/$slug/", "") }
+            ?.distinctBy { it.url }
+            .orEmpty()
+        return AnimesPage(seasons, page < chunks.size)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = throw UnsupportedOperationException()
@@ -229,15 +243,34 @@ abstract class AnimeSama :
         val cleanUrl = url.substringBefore("#")
         val currentFolder = cleanUrl.substringAfterLast("/")
         val isVoiceFolder = VOICES_VALUES.contains(currentFolder)
-        val parentUrl = if (isVoiceFolder) {
-            "$baseUrl${cleanUrl.substringBeforeLast("/")}"
-        } else {
-            "$baseUrl$cleanUrl"
-        }
+        val parentPath = if (isVoiceFolder) cleanUrl.substringBeforeLast("/") else cleanUrl
+        val parentUrl = "$baseUrl$parentPath"
 
-        val paths = (listOf(currentFolder) + VOICES_VALUES).distinct()
-        val results = paths.parallelMapBlocking { runCatching { fetchPlayers("$parentUrl/$it") } }
-        val players = results.map { it.getOrDefault(emptyList()) }
+        // Page courante d'abord : elle liste les langues réellement disponibles (languesDispo),
+        // ce qui évite de tester les ~10 dossiers de langue (la plupart répondent 404).
+        val firstResult = runCatching { fetchPlayerPage("$parentUrl/$currentFolder") }
+        val available = firstResult.getOrNull()?.html
+            ?.let { LANGUES_REGEX.find(it)?.groupValues?.get(1) }
+            ?.let { QUOTED_REGEX.findAll(it).map { m -> m.groupValues[1] }.toList() }
+            ?.filter { it in VOICES_VALUES }
+            ?.takeIf { it.isNotEmpty() }
+            ?: VOICES_VALUES.toList()
+        val paths = (listOf(currentFolder) + available).distinct()
+        val results = listOf(firstResult.map { it.players }) +
+            paths.drop(1).parallelMapBlocking { runCatching { fetchPlayers("$parentUrl/$it") } }
+        // Chaque lien « lien:ID » garde le chemin de sa page : le jeton de résolution expire
+        // après 24 h, on le relit donc au moment de lancer l'épisode (getHosterList).
+        val players = results.mapIndexed { i, result ->
+            result.getOrDefault(emptyList()).map { player ->
+                player.map { link ->
+                    if (link.startsWith("lien:")) {
+                        "$parentPath/${paths[i]}$LIEN_MARK${link.removePrefix("lien:")}"
+                    } else {
+                        link
+                    }
+                }
+            }
+        }
         if (players.all { it.isEmpty() }) {
             results.firstNotNullOfOrNull { it.exceptionOrNull() }?.let { throw it }
         }
@@ -315,37 +348,109 @@ abstract class AnimeSama :
 
     override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
+    private class PageData(val token: String, val meta: JsonObject)
+
+    // Jeton (epsJeton) et métadonnées (epsMeta : domaine + état de chaque lien) d'une page de lecteur.
+    private suspend fun fetchPageData(pageUrl: String): PageData {
+        val html = getPageHtml(pageUrl).html
+        val data = Jsoup.parse(html).selectFirst("script[data-source=bdd]")?.data() ?: html
+        val token = TOKEN_REGEX.find(data)?.groupValues?.get(1)
+            ?: throw Exception("epsJeton introuvable sur $pageUrl")
+        val meta = META_REGEX.find(data)?.groupValues?.get(1)
+            ?.let { Json.parseToJsonElement(it).jsonObject }
+            ?: JsonObject(emptyMap())
+        return PageData(token, meta)
+    }
+
     // One hoster per player link: a slow or blocked host only affects its own hoster.
+    // The real video URL is only requested in getVideoList (/api/lien.php), so opening
+    // an episode does not fire one request per player.
     override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val playerUrls = episode.url.parseAs<List<List<String>>>()
         val voiceNames = episode.scanlator?.split(", ").orEmpty()
         val seenUrls = mutableSetOf<String>()
         val nameCounts = mutableMapOf<String, Int>()
 
+        // Le jeton expire après 24 h : on le relit à chaque ouverture d'épisode
+        val pageResults = playerUrls.flatten()
+            .filter { LIEN_MARK in it }
+            .map { it.substringBefore(LIEN_MARK) }
+            .distinct()
+            .parallelMapBlocking { path -> path to runCatching { fetchPageData("$baseUrl$path") } }
+            .toMap()
+        val pages = pageResults.mapValues { it.value.getOrNull() }
+        var deleted = 0
+        var dead = 0
+
         // Filter empty voice groups first to keep voice index aligned with scanlator
         // (playersToEpisodes stores outer=voice, scanlator skips empty voices)
-        return playerUrls
+        val hosters = playerUrls
             .filter { it.isNotEmpty() }
             .flatMapIndexed { i, urls ->
                 val prefix = "(${voiceNames.getOrElse(i) { "" }}) ".takeUnless { it.trim() == "()" }.orEmpty()
                 urls.filter { it.isNotEmpty() }.map { it to prefix }
             }
-            .filter { (url, _) -> DEAD_HOSTS.none { url.contains(it, ignoreCase = true) } && seenUrls.add(url) }
-            .map { (url, prefix) ->
-                val label = url.playerHost()?.label ?: url.toHttpUrlOrNull()?.host ?: "Player"
+            .mapNotNull { (link, prefix) ->
+                val hosterUrl: String
+                val domain: String
+                if (LIEN_MARK in link) {
+                    val id = link.substringAfter(LIEN_MARK)
+                    val page = pages[link.substringBefore(LIEN_MARK)] ?: return@mapNotNull null
+                    val meta = page.meta[id]?.jsonArray
+                    // état 1 ou 2 = vidéo supprimée chez l'hébergeur
+                    if ((meta?.getOrNull(1)?.jsonPrimitive?.intOrNull ?: 0) != 0) {
+                        deleted++
+                        return@mapNotNull null
+                    }
+                    domain = meta?.getOrNull(0)?.jsonPrimitive?.contentOrNull.orEmpty()
+                    hosterUrl = "$baseUrl/api/lien.php".toHttpUrl().newBuilder()
+                        .addQueryParameter("j", page.token)
+                        .addQueryParameter("l", id)
+                        .build()
+                        .toString()
+                } else {
+                    hosterUrl = link
+                    domain = link
+                }
+                if (DEAD_HOSTS.any { domain.contains(it, ignoreCase = true) }) {
+                    dead++
+                    return@mapNotNull null
+                }
+                if (!seenUrls.add(hosterUrl)) return@mapNotNull null
+
+                val label = domain.playerHost()?.label
+                    ?: domain.toHttpUrlOrNull()?.host
+                    ?: domain.ifEmpty { null }
+                    ?: "Player"
                 val baseName = "$prefix$label"
                 val count = (nameCounts[baseName] ?: 0) + 1
                 nameCounts[baseName] = count
                 Hoster(
-                    hosterUrl = url,
+                    hosterUrl = hosterUrl,
                     hosterName = if (count > 1) "$baseName $count" else baseName,
                     internalData = prefix,
                 )
             }
+
+        if (hosters.isEmpty()) {
+            // Message explicite à la place du vague « Hoster list is empty »
+            val pageError = pageResults.entries.firstNotNullOfOrNull { (path, result) ->
+                result.exceptionOrNull()?.let { "$path : ${it.message ?: it::class.simpleName}" }
+            }
+            throw Exception(
+                pageError ?: "Aucun lecteur utilisable ($deleted vidéo(s) supprimée(s), $dead hébergeur(s) hors service, " +
+                    "${playerUrls.sumOf { it.size }} lien(s) au total)",
+            )
+        }
+        return hosters
     }
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val playerUrl = hoster.hosterUrl
+        val playerUrl = if ("/api/lien.php" in hoster.hosterUrl) {
+            resolveLink(hoster.hosterUrl) ?: return emptyList()
+        } else {
+            hoster.hosterUrl
+        }
         val prefix = hoster.internalData
 
         val host = playerUrl.playerHost()
@@ -370,6 +475,23 @@ abstract class AnimeSama :
                 emptyList()
             }
         }.distinctVideos()
+    }
+
+    // « lien:ID » -> vraie URL du lecteur, via /api/lien.php (même appel que js/contenu/videos.js)
+    private suspend fun resolveLink(apiUrl: String): String? {
+        val apiHeaders = headers.newBuilder()
+            .set("Accept", "application/json")
+            .set("Referer", "$baseUrl/")
+            .build()
+        repeat(3) { attempt ->
+            val res = runCatching {
+                client.newCall(GET(apiUrl, apiHeaders)).await().use { it.body.string().parseAs<LienResponse>() }
+            }.getOrNull()
+            res?.u?.takeIf { it.isNotBlank() }?.let { return it }
+            if (res?.erreur == "absent") return null
+            delay(1000L * (attempt + 1))
+        }
+        return null
     }
 
     private fun List<Video>.distinctVideos() = distinctBy { it.videoTitle to it.videoUrl.substringBefore("?") }
@@ -404,17 +526,18 @@ abstract class AnimeSama :
         season: String,
         initialized: Boolean = false,
     ): List<SAnime> {
-        val response = client.newCall(GET(animeUrl, headers)).awaitSuccess()
-        return fetchAnimeSeasons(response, season, initialized)
+        val page = getPageHtml(animeUrl, ANIME_PAGE_TTL_MS)
+        return fetchAnimeSeasons(page.html, page.finalUrl, season, initialized)
     }
 
     private suspend fun fetchAnimeSeasons(
-        response: Response,
+        html: String,
+        finalUrl: String,
         season: String,
         initialized: Boolean,
     ): List<SAnime> {
-        val animeDoc = response.useAsJsoup()
-        val animeUrl = response.request.url.toString().removeSuffix("/")
+        val animeDoc = Jsoup.parse(html, finalUrl)
+        val animeUrl = finalUrl.removeSuffix("/")
         val animeName = animeDoc.selectFirst("h1")?.text() ?: ""
 
         val statusText = animeDoc.infoValue("Statut").orEmpty().lowercase()
@@ -517,17 +640,48 @@ abstract class AnimeSama :
 
     private class PlayerPage(val html: String, val players: List<List<String>>)
 
+    // Cache mémoire de courte durée : l'app demande les détails ET les épisodes en parallèle, et on relit
+    // les mêmes pages au moment de lancer un épisode. Un verrou par URL évite les requêtes en double.
+    private class CachedPage(val finalUrl: String, val html: String, val timestamp: Long)
+
+    private val pageCache = ConcurrentHashMap<String, CachedPage>()
+    private val pageLocks = ConcurrentHashMap<String, Mutex>()
+
+    private suspend fun getPageHtml(url: String, ttlMs: Long = PAGE_CACHE_TTL_MS): CachedPage {
+        val pageUrl = "${url.removeSuffix("/")}/"
+        return pageLocks.getOrPut(pageUrl) { Mutex() }.withLock {
+            val now = System.currentTimeMillis()
+            pageCache[pageUrl]?.takeIf { now - it.timestamp < ttlMs }?.let { return@withLock it }
+            val response = client.newCall(GET(pageUrl, headers)).awaitSuccess()
+            val entry = CachedPage(response.request.url.toString(), response.bodyString(), now)
+            if (pageCache.size >= PAGE_CACHE_MAX) {
+                pageCache.entries.removeIf { now - it.value.timestamp >= ANIME_PAGE_TTL_MS }
+                if (pageCache.size >= PAGE_CACHE_MAX) pageCache.clear()
+            }
+            pageCache[pageUrl] = entry
+            entry
+        }
+    }
+
     private suspend fun fetchPlayers(url: String): List<List<String>> = fetchPlayerPage(url).players
 
     private suspend fun fetchPlayerPage(url: String): PlayerPage {
         val pageUrl = "${url.removeSuffix("/")}/"
-        val pageResponse = client.newCall(GET(pageUrl, headers)).awaitSuccess()
-        val finalUrl = pageResponse.request.url.toString()
-        val html = pageResponse.bodyString()
-        val scriptUrl = Jsoup.parse(html, finalUrl)
-            .selectFirst("script[src*='episodes.js']")?.absUrl("src")
+        val cached = getPageHtml(pageUrl)
+        val finalUrl = cached.finalUrl
+        val html = cached.html
+        val doc = Jsoup.parse(html, finalUrl)
+
+        // Depuis la refonte du site (11/2026), la liste des épisodes est dans un <script data-source="bdd">
+        // directement dans la page (plus de fichier episodes.js) : var eps1 = ["lien:123", ...]
+        doc.selectFirst("script[data-source=bdd]")?.data()?.let { data ->
+            return PlayerPage(html, parsePlayers(data))
+        }
+
+        // Ancien fonctionnement, gardé en secours
+        val scriptUrl = doc.selectFirst("script[src*='episodes.js']")?.absUrl("src")
             ?.takeIf { it.isNotEmpty() }
-            ?: throw Exception("episodes.js introuvable sur $pageUrl")
+            ?: throw Exception("Données d'épisodes introuvables sur $finalUrl")
 
         val scriptHeaders = headers.newBuilder()
             .set("Referer", pageUrl)
@@ -695,7 +849,7 @@ abstract class AnimeSama :
         private val PLAYERS = playersMap.keys.toTypedArray()
         private val PLAYERS_VALUES = playersMap.values.toTypedArray()
 
-        private val VIDHIDE_DOMAINS = listOf("smoothpre", "movearnpre", "minochinos", "morencius", "earnvids")
+        private val VIDHIDE_DOMAINS = listOf("smoothpre", "movearnpre", "minochinos", "morencius", "earnvids", "dingtezuni")
 
         private val VOE_DOMAINS = listOf(
             "voe.sx",
@@ -705,7 +859,19 @@ abstract class AnimeSama :
             "jamesbornmain",
             "claireguessthousand",
             "derricknationtop",
+            "shanelocaldog",
+            "jamespatterncamera",
+            "shannoncoldalready",
+            "susanexpectcare",
         )
+
+        private const val LIEN_MARK = "#lien:"
+        private const val PAGE_CACHE_TTL_MS = 5 * 60 * 1000L
+        private const val ANIME_PAGE_TTL_MS = 15 * 60 * 1000L
+        private const val PAGE_CACHE_MAX = 40
+        private val LANGUES_REGEX = Regex("""languesDispo\s*=\s*\[(.*?)]""", RegexOption.DOT_MATCHES_ALL)
+        private val TOKEN_REGEX = Regex("""epsJeton\s*=\s*["']([^"']+)["']""")
+        private val META_REGEX = Regex("""epsMeta\s*=\s*(\{.*?\})\s*;""", RegexOption.DOT_MATCHES_ALL)
 
         private val DEAD_HOSTS = listOf("sibnet.ru", "oneupload", "embed4me", "player4me", "4meplayer", "myvi")
 
@@ -724,4 +890,10 @@ abstract class AnimeSama :
 private class CatalogueFragment(
     val liste: String,
     val pagination: String,
+)
+
+@Serializable
+private class LienResponse(
+    val u: String? = null,
+    val erreur: String? = null,
 )
