@@ -423,8 +423,11 @@ abstract class Voiranime : AnimeHttpSource() {
 
     // Les images peuvent être chargées en lazy-loading : l'URL réelle est alors dans `data-src`.
     private fun Element?.imageUrl(): String? = this
-        ?.let { img -> img.absUrl("data-src").ifEmpty { img.absUrl("src") } }
+        ?.let { img ->
+            img.absUrl("data-src").ifEmpty { img.absUrl("src") }
+        }
         ?.takeIf(String::isNotBlank)
+        ?.replace(THUMB_SIZE_REGEX, "$1")
 
     // Cherche un bloc `.post-content_item` par son libellé (`.summary-heading`) et retourne son
     // `.summary-content`. Les libellés sont en anglais sur le site ("Status", "Genre(s)"…).
@@ -449,5 +452,6 @@ abstract class Voiranime : AnimeHttpSource() {
         private val VOSTFR_REGEX = Regex("""\bVOSTFR\b""", RegexOption.IGNORE_CASE)
         private val VF_SLUG_REGEX = Regex("""(^|-)vf($|-)""", RegexOption.IGNORE_CASE)
         private val VF_TEXT_REGEX = Regex("""\bVF\b""")
+        private val THUMB_SIZE_REGEX = Regex("""-\d{2,4}x\d{2,4}(\.(?:jpe?g|png|webp))$""", RegexOption.IGNORE_CASE)
     }
 }
